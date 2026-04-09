@@ -1,0 +1,38 @@
+# Project Config
+
+name=agent-system
+version=1.0.0
+
+# Database Config
+db_host=localhost
+db_port=5432
+db_user=admin
+db_password=admin123
+
+# Feature Flags
+enable_logging=true
+enable_cache=false
+
+# Paths
+log_path=/var/log/agent.log
+data_path=/usr/local/data
+
+# Duplicate Lines Test
+key=value1
+key=value2
+
+# Similar Pattern Test
+timeout=30
+timeout_ms=30000
+
+# Edge Case
+empty_line=
+
+# JSON Block
+config={"env":"dev","debug":true}
+
+# Multiline Block
+script_start
+echo "hello"
+echo "world"
+script_end

@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
 from typing import Any
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
-from rich.text import Text
 
 from .config import MAX_TOKENS, MAX_TURNS, MODEL
 from .llm import create_llm_client
-from .tools import TOOLS, execute_tool
+from .tools import ToolContext, registry
 
 console = Console()
+
 
 def _call_llm(client, messages, tools=None, stream=False):
     """调用 LLM API，显示动态计时，完成后打印耗时和 token 用量。"""
@@ -72,12 +72,14 @@ def _call_llm(client, messages, tools=None, stream=False):
 
     return response
 
+
 def _parse_tool_args(raw: str) -> dict[str, Any]:
     """解析工具调用参数，解析失败时返回包含错误信息的字典。"""
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
         return {"_parse_error": f"Invalid JSON: {e}"}
+
 
 def print_response(msg: dict[str, Any]) -> None:
     """打印助手回复消息，如有推理内容则一并显示。"""
@@ -89,11 +91,13 @@ def print_response(msg: dict[str, Any]) -> None:
     if content:
         console.print(content)
 
+
 def agent_loop(messages: list[dict[str, Any]]) -> None:
     """运行一次代理循环：调用大型语言模型(LLM)，执行工具。"""
     client = create_llm_client()
+    tools_schema = registry.schemas()
 
-    response = _call_llm(client, messages, tools=TOOLS)
+    response = _call_llm(client, messages, tools=tools_schema)
 
     choice = response.choices[0]
 
@@ -106,12 +110,13 @@ def agent_loop(messages: list[dict[str, Any]]) -> None:
 
     # 工具调用循环
     turn_count = 0
+    tool_context = ToolContext(working_dir=os.getcwd())
+
     while choice.finish_reason == "tool_calls":
         turn_count += 1
 
         # 安全兜底：触达上限时注入收尾提示, TODO: 主Agent不需要限制, 子Agent才需要这种限制, 暂时保留逻辑验证效果
         if turn_count >= MAX_TURNS:
-            # console.print(f"[yellow]安全限制：已达到 {MAX_TURNS} 次迭代，正在收尾...[/yellow]")
             messages.append({
                 "role": "user",
                 "content": "你已达到迭代安全上限。请基于当前已收集的信息给出最终回复。",
@@ -143,34 +148,24 @@ def agent_loop(messages: list[dict[str, Any]]) -> None:
                 console.print(f"[red]Parse error: {args['_parse_error']}[/red]")
                 continue
 
-            command = args["command"]
-            console.print(f"\n[yellow]$ {command}[/yellow]")
-            output = execute_tool("bash", args)
-            print(output)
+            name = tool_call.function.name
+            console.print(f"\n[yellow]$ {args.get('command', name)}[/yellow]")
+            result = registry.execute(name, args, tool_context)
+            print(result.output)
 
             tool_results.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "content": output,
+                "content": result.output,
             })
 
         messages.extend(tool_results)
 
         # 携带工具结果再次调用 LLM
-        response = _call_llm(client, messages, tools=TOOLS)
+        response = _call_llm(client, messages, tools=tools_schema)
         choice = response.choices[0]
 
-    # 最终响应 — 以流式方式输出
-    stream = _call_llm(client, messages, stream=True)
-
-    collected_content = ""
-    live_text = Text()
-
-    with Live(live_text, console=console, refresh_per_second=15):
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                collected_content += delta.content
-                live_text.append(delta.content)
-
-    messages.append({"role": "assistant", "content": collected_content})
+    # 最终响应 — 使用 while 循环最后一次调用的结果
+    final_msg = choice.message.model_dump()
+    print_response(final_msg)
+    messages.append({"role": "assistant", "content": final_msg.get("content") or ""})
