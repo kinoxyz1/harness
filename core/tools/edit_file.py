@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import ToolContext, ToolResult
+from . import ToolUseContext, ToolResult, safe_path
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -13,10 +13,17 @@ SCHEMA: dict[str, Any] = {
         "name": "edit_file",
         "description": (
             "基于字符串替换编辑文件。在文件中查找 old_string 并替换为 new_string。"
-            "默认只替换第一个匹配项，设置 replace_all 为 true 可替换所有匹配项。"
-            "如果 old_string 在文件中不存在或不唯一（且未设置 replace_all），将返回错误。"
-            "适用于对文件进行精确、局部的修改。"
-            "如需完全重写文件，请使用 write_file 工具。"
+            "\n\n前置条件（系统强制）："
+            "\n- 必须先用 read_file 完整读取目标文件，否则会被拒绝执行（error: not_read）。"
+            "\n- 如果文件在读取后被外部修改，也会被拒绝执行（error: stale），需要重新读取。"
+            "\n- 只读了部分内容（使用了 offset/limit）也不行，必须是完整读取。"
+            "\n\n匹配规则："
+            "\n- old_string 必须与文件内容精确匹配（包括缩进和空行）。"
+            "\n- 默认只替换第一个匹配项。设置 replace_all=true 可替换所有匹配项。"
+            "\n- 如果 old_string 在文件中存在多处匹配且未设置 replace_all，会报错（error: ambiguous_match）。"
+            "\n\n使用场景："
+            "\n- 对文件进行精确、局部的修改（不要用 bash sed/awk，用本工具更安全）"
+            "\n- 如需完全重写文件，请使用 write_file 工具"
         ),
         "parameters": {
             "type": "object",
@@ -47,16 +54,67 @@ SCHEMA: dict[str, Any] = {
 
 READONLY = False
 
+ANNOTATIONS: dict[str, bool] = {
+    "readonly": False,
+    "destructive": False,
+    "idempotent": False,
+    "concurrency_safe": False,
+}
+
+# ─── Prompt（给模型的详细使用指南）────────────────────
+
+PROMPT: str = """\
+## edit_file — 基于字符串替换编辑文件
+
+在文件中查找 old_string 并替换为 new_string。适用于对文件进行精确、局部的修改。
+
+### 前置条件（必须遵守）
+- 在使用 edit_file 之前，必须先用 read_file 完整读取目标文件。
+  系统会强制检查：如果未读取或只做了分段读取，edit_file 将被拒绝并提示重新读取。
+- 如果文件在读取后被外部修改（staleness 检测），系统会要求重新读取后再编辑。
+
+### 匹配规则
+- old_string 必须与文件内容精确匹配，包括缩进、空行、空格。
+  系统提示的行号格式为 `行号\\t内容`，old_string 中不应包含行号前缀。
+- 默认只替换第一个匹配项。
+- 如果 old_string 在文件中出现多次且未设置 replace_all=true，系统会返回错误，
+  因为无法确定要替换哪一处。此时应提供更精确的上下文使匹配唯一，或设置 replace_all=true。
+
+### 使用建议
+- 对于小范围修改（改一个函数名、修一个 bug、调整配置项），优先使用 edit_file。
+- 如果需要重写文件的大部分内容，考虑使用 write_file。
+- 每次编辑后系统会自动更新文件认知，无需重新读取即可继续编辑同一文件。
+"""
+
 # ─── Handler（执行逻辑）─────────────────────────────
 
 
-def handle(args: dict[str, Any], context: ToolContext) -> ToolResult:
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     """基于字符串替换编辑文件。"""
-    file_path = Path(args["path"])
+    try:
+        file_path = safe_path(args["path"], context.working_dir)
+    except ValueError as e:
+        return ToolResult(output=str(e), success=False, error="path_escape")
 
-    # 相对路径基于工作目录
-    if not file_path.is_absolute():
-        file_path = Path(context.working_dir) / file_path
+    # ── read-before-write 强制检查 ──
+    abs_path = str(file_path)
+    state = context.get_file_state(abs_path)
+    if not state or not state.is_full_read:
+        return ToolResult(
+            output="请先使用 read_file 完整读取此文件，再进行编辑。",
+            success=False,
+            error="not_read",
+        )
+
+    # ── staleness 检测 ──
+    if file_path.exists():
+        current_mtime = file_path.stat().st_mtime
+        if current_mtime != state.timestamp:
+            return ToolResult(
+                output="文件在你读取后被修改了，请重新读取后再编辑。",
+                success=False,
+                error="stale",
+            )
 
     if not file_path.exists():
         return ToolResult(output=f"文件不存在: {file_path}", success=False, error="not_found")
@@ -106,5 +164,8 @@ def handle(args: dict[str, Any], context: ToolContext) -> ToolResult:
         file_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
         return ToolResult(output=str(e), success=False, error="write_error")
+
+    # 更新文件认知
+    context.update_file_state(abs_path, new_content)
 
     return ToolResult(output=f"已替换 {replaced} 处匹配", success=True)
