@@ -1,14 +1,23 @@
+"""简化版入口：LLM 自主管理 todo，无需 planner。"""
 from __future__ import annotations
 
 from rich.console import Console
 
-from core.agent import agent_loop
+from core.llm_client import OpenAIClient
+from core.context import ContextPipeline, SystemContextPlugin, UserContextPlugin
+from core.renderer import RichRenderer
+from core.agent import AgentLoop
 
 console = Console()
 
 SYSTEM_PROMPT = "无论如何你都要使用中文回答用户"
 
+
 def main() -> None:
+    # 装配依赖（循环外一次）
+    renderer = RichRenderer(console)
+    llm = OpenAIClient()
+
     history: list[dict[str, str]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
@@ -30,8 +39,16 @@ def main() -> None:
             continue
 
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+
+        # 装配 context pipeline
+        context = ContextPipeline()
+        context.register(SystemContextPlugin())
+        context.register(UserContextPlugin())
+
+        # 执行（LLM 自主管理 todo）
+        AgentLoop(llm, renderer, context).run(history)
         print()
+
 
 if __name__ == "__main__":
     main()

@@ -10,29 +10,22 @@
 """
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 # ─── 框架层提示词（不可通过文件覆盖）─────────────────────
 
 _FRAMEWORK_PROMPT = """\
-你是一个 AI 编程助手，运行在 harness 代理框架中。你可以通过工具与用户的开发环境交互。
+你是一个 AI 助手，运行在 harness 代理框架中。
+你有以下可用工具：文件读写、文件搜索、文件编辑、bash 命令执行。工具的详细用法见各工具的描述。
 
-工作原则：
-1. 先理解用户需求，再选择合适的工具。不要盲目执行命令。
-2. 使用工具前，确保你了解工具的行为和限制（详见各工具的使用说明）。
-3. 对文件操作遵循"先读后改"原则：读取文件理解内容，再进行编辑。
-4. 优先使用专用工具而非 bash 命令来操作文件，专用工具更安全、更精确。
-5. 遇到不确定的情况，先探索再行动。
-6. 如果工具返回错误，仔细阅读错误信息，理解原因后调整策略。
-
-行为准则：
-- 优先使用专用工具操作文件（搜索、读取、编辑、创建），而非通过 bash 执行等效命令。
-- 你可以在一次回复中调用多个工具。框架会自动处理：只读工具并行执行，写工具串行执行。
-- 工具返回错误时不要重试相同操作，先分析错误原因。
+判断用户意图：日常对话直接回答，需要操作时使用工具。
+多步骤任务必须先调用 todo tool 创建计划，保持恰好一个 in_progress 任务，每步完成后更新状态。优先使用工具而非文字描述。
 """
 
 # 用户定制文件的加载顺序（后面的覆盖前面的）
@@ -78,3 +71,73 @@ def get_user_context(working_dir: str) -> str:
         f"  python: {python_ver}\n"
         f"</environment>"
     )
+
+
+class ContextPipeline:
+    """上下文注入管道。管理多个 ContextPlugin，按注册顺序执行。"""
+
+    def __init__(self) -> None:
+        self._plugins: list[Any] = []
+
+    def register(self, plugin: Any) -> None:
+        """注册一个插件。"""
+        self._plugins.append(plugin)
+
+    def inject_all(self, messages: list[dict[str, Any]]) -> None:
+        """执行所有已注册插件的注入。"""
+        for plugin in self._plugins:
+            plugin.inject(messages)
+
+
+class SystemContextPlugin:
+    """注入系统提示词。幂等（marker 检查）。"""
+
+    def __init__(self, project_root: str | None = None) -> None:
+        self._project_root = project_root or os.getcwd()
+
+    def inject(self, messages: list[dict[str, Any]]) -> None:
+        """将通用系统提示词追加到已有的系统消息中。"""
+        marker = "<!-- system-context-injected -->"
+        for msg in messages:
+            if msg.get("role") == "system" and marker in (msg.get("content") or ""):
+                return
+
+        system_ctx = get_system_context(self._project_root)
+
+        for msg in messages:
+            if msg.get("role") == "system":
+                existing = msg.get("content") or ""
+                msg["content"] = f"{existing}\n\n{marker}\n\n{system_ctx}"
+                return
+
+        messages.insert(0, {
+            "role": "system",
+            "content": f"{marker}\n\n{system_ctx}",
+        })
+
+
+class UserContextPlugin:
+    """注入环境信息。幂等（marker 检查）。"""
+
+    def __init__(self, working_dir: str | None = None) -> None:
+        self._working_dir = working_dir or os.getcwd()
+
+    def inject(self, messages: list[dict[str, Any]]) -> None:
+        """在消息列表中注入环境信息。"""
+        marker = "<!-- user-context-injected -->"
+        for msg in messages:
+            if msg.get("role") == "user" and msg.get("content", "").startswith(marker):
+                return
+
+        user_ctx = get_user_context(self._working_dir)
+        content = f"{marker}\n{user_ctx}"
+
+        insert_pos = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                insert_pos = i
+                break
+        else:
+            insert_pos = len(messages)
+
+        messages.insert(insert_pos, {"role": "user", "content": content})
