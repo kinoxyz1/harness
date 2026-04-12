@@ -121,7 +121,9 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
 
     # 读取最终文件内容更新认知
     final_content = file_path.read_text(encoding="utf-8")
-    context.update_file_state(str(file_path), final_content)
+    abs_path = str(file_path)
+    context.update_file_state(abs_path, final_content)
+    context.mark_file_modified(abs_path)
 
     lines = final_content.count("\n") + (1 if final_content and not final_content.endswith("\n") else 0)
     if is_append:

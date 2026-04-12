@@ -14,6 +14,7 @@ from typing import Any
 
 from .tools import ToolResult, ToolUseContext
 from .config import MAX_OUTPUT_CHARS
+from .run_options import RunDisplayOptions
 
 
 @dataclass
@@ -37,9 +38,15 @@ class _Batch:
 class ToolExecutorRuntime:
     """工具执行运行时。"""
 
-    def __init__(self, registry, context: ToolUseContext):
+    def __init__(
+        self,
+        registry,
+        context: ToolUseContext,
+        display: RunDisplayOptions | None = None,
+    ):
         self._registry = registry
         self._context = context
+        self._display = display or RunDisplayOptions()
 
     def execute_batch(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
         """接收一批 tool_call，分批执行，返回有序结果。"""
@@ -49,11 +56,12 @@ class ToolExecutorRuntime:
         batches = self._partition(tool_calls)
         all_results: dict[int, ToolResult] = {}
 
-        sys.stdout.write(f"\033[36m[Runtime] 收到 {len(tool_calls)} 个 tool_call，分为 {len(batches)} 批：\033[0m\n")
-        for i, b in enumerate(batches):
-            mode = "并行" if b.parallel else "串行"
-            names = [c.name for c in b.calls]
-            sys.stdout.write(f"\033[36m[Runtime]   Batch {i}: [{mode}] {names}\033[0m\n")
+        if not self._display.quiet:
+            sys.stdout.write(f"\033[36m[Runtime] 收到 {len(tool_calls)} 个 tool_call，分为 {len(batches)} 批：\033[0m\n")
+            for i, b in enumerate(batches):
+                mode = "并行" if b.parallel else "串行"
+                names = [c.name for c in b.calls]
+                sys.stdout.write(f"\033[36m[Runtime]   Batch {i}: [{mode}] {names}\033[0m\n")
 
         batch_start = time.time()
         for batch in batches:
@@ -64,7 +72,8 @@ class ToolExecutorRuntime:
             all_results.update(batch_results)
 
         elapsed = time.time() - batch_start
-        sys.stdout.write(f"\033[36m[Runtime] 全部完成，耗时 {elapsed:.2f}s\033[0m\n")
+        if not self._display.quiet:
+            sys.stdout.write(f"\033[36m[Runtime] 全部完成，耗时 {elapsed:.2f}s\033[0m\n")
 
         # 按原始顺序返回
         return [all_results[i] for i in range(len(tool_calls))]
@@ -91,7 +100,8 @@ class ToolExecutorRuntime:
     def _execute_parallel(self, batch: _Batch) -> dict[int, ToolResult]:
         """并行执行只读工具，结果按 idx 排序。"""
         results: dict[int, ToolResult] = {}
-        sys.stdout.write(f"\033[36m[Runtime] ▶ 并行执行 {len(batch.calls)} 个只读工具：{[c.name for c in batch.calls]}\033[0m\n")
+        if not self._display.quiet:
+            sys.stdout.write(f"\033[36m[Runtime] ▶ 并行执行 {len(batch.calls)} 个只读工具：{[c.name for c in batch.calls]}\033[0m\n")
 
         with ThreadPoolExecutor(max_workers=len(batch.calls)) as pool:
             futures = {
@@ -115,7 +125,8 @@ class ToolExecutorRuntime:
         """串行执行写工具（独占）。"""
         results: dict[int, ToolResult] = {}
         for call in batch.calls:
-            sys.stdout.write(f"\033[36m[Runtime] ▶ 串行执行写工具：{call.name}\033[0m\n")
+            if not self._display.quiet:
+                sys.stdout.write(f"\033[36m[Runtime] ▶ 串行执行写工具：{call.name}\033[0m\n")
             results[call.idx] = self._run_single(call)
         return results
 
@@ -156,18 +167,20 @@ class ToolExecutorRuntime:
             if thread.is_alive():
                 elapsed = int(time.time() - start)
                 if elapsed >= 2:
-                    sys.stdout.write(f"\r\033[K\033[36m[Runtime]   ⏳ {call.name} 执行中... {elapsed}s\033[0m")
-                    sys.stdout.flush()
-                    shown_progress = True
+                    if not self._display.quiet:
+                        sys.stdout.write(f"\r\033[K\033[36m[Runtime]   ⏳ {call.name} 执行中... {elapsed}s\033[0m")
+                        sys.stdout.flush()
+                        shown_progress = True
 
-        if shown_progress:
+        if shown_progress and not self._display.quiet:
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
 
         elapsed = time.time() - start
 
         if error_holder:
-            sys.stdout.write(f"\033[36m[Runtime]   ✗ {call.name} 异常 ({elapsed:.2f}s): {error_holder[0]}\033[0m\n")
+            if not self._display.quiet:
+                sys.stdout.write(f"\033[36m[Runtime]   ✗ {call.name} 异常 ({elapsed:.2f}s): {error_holder[0]}\033[0m\n")
             return ToolResult(
                 output=f"Internal error: {error_holder[0]}",
                 success=False,
@@ -175,5 +188,6 @@ class ToolExecutorRuntime:
             )
 
         result = result_holder[0]
-        sys.stdout.write(f"\033[36m[Runtime]   ✓ {call.name} 完成 ({elapsed:.2f}s, success={result.success})\033[0m\n")
+        if not self._display.quiet:
+            sys.stdout.write(f"\033[36m[Runtime]   ✓ {call.name} 完成 ({elapsed:.2f}s, success={result.success})\033[0m\n")
         return result

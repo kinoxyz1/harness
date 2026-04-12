@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+from .run_options import RunDisplayOptions
+
 
 @runtime_checkable
 class LLMClient(Protocol):
@@ -16,6 +18,8 @@ class LLMClient(Protocol):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        display: RunDisplayOptions | None = None,
     ) -> Any:
         """调用 LLM，返回 LLMResponse。"""
         ...
@@ -81,5 +85,4 @@ class Renderer(Protocol):
     def show_status(self, message: str) -> None:
         """显示状态信息（灰色 dim）。"""
         ...
-
 

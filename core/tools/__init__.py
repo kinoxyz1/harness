@@ -69,6 +69,7 @@ class ToolUseContext:
 
         # ── 文件认知层 ──
         self._file_state: dict[str, FileState] = {}
+        self._files_modified: list[str] = []
 
         # ── 对话层 ──
         self._messages: list[dict[str, Any]] | None = None
@@ -110,7 +111,17 @@ class ToolUseContext:
 
     def get_file_state(self, path: str) -> FileState | None:
         """查询工具对某个文件的认知。返回 None 表示未认知。"""
-        return self._file_state.get(path)
+        state = self._file_state.get(path)
+        if state is None:
+            return None
+        try:
+            if os.path.getmtime(path) != state.timestamp:
+                del self._file_state[path]
+                return None
+        except OSError:
+            del self._file_state[path]
+            return None
+        return state
 
     def set_file_state(self, path: str, state: FileState) -> None:
         """记录对文件的认知（read_file 成功后调用）。"""
@@ -126,6 +137,16 @@ class ToolUseContext:
     def invalidate_file_state(self, path: str) -> None:
         """使对某个文件的认知失效。"""
         self._file_state.pop(path, None)
+
+    @property
+    def files_modified(self) -> list[str]:
+        """返回受管写工具记录的修改文件列表。"""
+        return list(self._files_modified)
+
+    def mark_file_modified(self, path: str) -> None:
+        """记录某个文件已被受管写工具修改。"""
+        if path not in self._files_modified:
+            self._files_modified.append(path)
 
     # ── 对话层 ──
 

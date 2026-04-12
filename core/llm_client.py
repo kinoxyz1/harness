@@ -18,6 +18,7 @@ from rich.console import Console
 from .config import ENABLE_THINKING, MAX_TOKENS, MODEL
 from .llm import create_llm_client
 from .protocol import normalize_messages
+from .run_options import RunDisplayOptions
 
 _console = Console()
 
@@ -103,12 +104,14 @@ class OpenAIClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
+        display: RunDisplayOptions | None = None,
     ) -> LLMResponse:
         """调用 LLM API，返回结构化的 LLMResponse。
 
         显示动态计时，完成后打印耗时和 token 用量。
         所有调用者拿到统一的 LLMResponse，不需要关心底层细节。
         """
+        display = display or RunDisplayOptions()
         params: dict[str, Any] = {
             "model": MODEL,
             "messages": normalize_messages(messages, enable_thinking=ENABLE_THINKING),
@@ -142,13 +145,15 @@ class OpenAIClient:
         # 主线程：每秒刷新计时
         while thread.is_alive():
             elapsed = int(time.time() - start)
-            sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
-            sys.stdout.flush()
+            if not display.quiet:
+                sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
+                sys.stdout.flush()
             thread.join(timeout=1.0)
 
         # 清除计时行
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        if not display.quiet:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
 
         if error.get("data"):
             raise error["data"]
@@ -158,10 +163,11 @@ class OpenAIClient:
 
         llm_resp = LLMResponse(response)
 
-        _console.print(
-            f"[dim]{elapsed:.1f}s │ token {llm_resp.prompt_tokens}↓ {llm_resp.completion_tokens}↑"
-            f" │ finish={llm_resp.finish_reason}[/dim]"
-        )
+        if not display.quiet:
+            _console.print(
+                f"[dim]{elapsed:.1f}s │ token {llm_resp.prompt_tokens}↓ {llm_resp.completion_tokens}↑"
+                f" │ finish={llm_resp.finish_reason}[/dim]"
+            )
 
         return llm_resp
 

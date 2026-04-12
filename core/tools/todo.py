@@ -149,6 +149,26 @@ def get_state() -> PlanningState:
     return _state
 
 
+def save_snapshot() -> PlanningState:
+    """保存当前 todo 状态快照。"""
+    return PlanningState(
+        items=[PlanItem(content=item.content, status=item.status) for item in _state.items],
+        rounds_since_update=_state.rounds_since_update,
+    )
+
+
+def restore_snapshot(snapshot: PlanningState) -> None:
+    """恢复 todo 状态快照。"""
+    _state.items = [PlanItem(content=item.content, status=item.status) for item in snapshot.items]
+    _state.rounds_since_update = snapshot.rounds_since_update
+
+
+def clear_state() -> None:
+    """清空当前 todo 状态。"""
+    _state.items = []
+    _state.rounds_since_update = 0
+
+
 def increment_rounds() -> int:
     """递增 rounds_since_update，返回新值。"""
     _state.rounds_since_update += 1

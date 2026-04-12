@@ -167,5 +167,6 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
 
     # 更新文件认知
     context.update_file_state(abs_path, new_content)
+    context.mark_file_modified(abs_path)
 
     return ToolResult(output=f"已替换 {replaced} 处匹配", success=True)

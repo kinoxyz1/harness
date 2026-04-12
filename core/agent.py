@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import time
 import traceback
@@ -15,11 +16,23 @@ from .context import ContextPipeline, SystemContextPlugin, UserContextPlugin
 from .llm_client import LLMResponse, OpenAIClient, _parse_tool_args
 from .renderer import RichRenderer
 from .runtime import ToolCall, ToolExecutorRuntime
+from .run_options import RunDisplayOptions
 from .tools import ToolResult, ToolUseContext, registry
 from .tools.todo import get_state, increment_rounds, reset_rounds
 
 
 # ─── AgentLoop ────────────────────────────────────────────
+
+
+@dataclass
+class AgentRunResult:
+    """单次 agent 运行的结构化结果。"""
+
+    final_output: str
+    success: bool
+    stop_reason: str
+    turns_used: int
+    files_modified: list[str]
 
 
 class AgentLoop:
@@ -31,47 +44,100 @@ class AgentLoop:
         renderer: Any,
         context: ContextPipeline,
         tools_schema: list[dict[str, Any]] | None = None,
+        display: RunDisplayOptions | None = None,
     ) -> None:
         self._llm = llm
         self._renderer = renderer
         self._context = context
         self._tools_schema = tools_schema or registry.schemas()
+        self._display = display or RunDisplayOptions()
 
-    def run(self, messages: list[dict[str, Any]]) -> None:
+    def run(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tool_context: ToolUseContext | None = None,
+    ) -> AgentRunResult:
         """运行一次代理循环。等价于原 agent_loop()。"""
         # 1. 注入上下文
         self._context.inject_all(messages)
 
         # 2. 首次 LLM 调用
         try:
-            llm_resp = self._llm.call(messages, tools=self._tools_schema)
+            llm_resp = self._llm.call(messages, tools=self._tools_schema, display=self._display)
         except Exception as e:
             self._renderer.show_error(f"API 调用失败: {e}")
-            return
+            return self._build_run_result(
+                tool_context=tool_context,
+                final_output="",
+                success=False,
+                stop_reason="api_error",
+            )
 
         # 3. 非工具调用响应 — 确保有内容后直接结束
         if not llm_resp.is_tool_call:
-            llm_resp = self._ensure_final_response(llm_resp, messages, None)
+            llm_resp = self._ensure_final_response(llm_resp, messages, None, tool_context)
             self._print_response(llm_resp)
-            messages.append({"role": "assistant", "content": llm_resp.content or ""})
-            return
+            final_output = llm_resp.content or ""
+            messages.append({"role": "assistant", "content": final_output})
+            return self._build_run_result(
+                tool_context=tool_context,
+                final_output=final_output,
+                success=bool(final_output.strip()),
+                stop_reason="completed" if final_output.strip() else "empty_response",
+            )
 
         # 4. 工具调用循环
-        tool_context = ToolUseContext(working_dir=os.getcwd(), max_turns=MAX_TURNS)
+        tool_context = tool_context or ToolUseContext(working_dir=os.getcwd(), max_turns=MAX_TURNS)
         tool_context.set_messages(messages)
 
         try:
-            llm_resp = self._run_tool_loop(llm_resp, messages, tool_context)
+            llm_resp, stop_reason = self._run_tool_loop(llm_resp, messages, tool_context)
         except Exception as e:
             self._renderer.show_error(f"工具执行异常: {e}")
             traceback.print_exc()
-            return
+            return self._build_run_result(
+                tool_context=tool_context,
+                final_output="",
+                success=False,
+                stop_reason="tool_error",
+            )
 
         # 5. 确保最终有可见内容
-        llm_resp = self._ensure_final_response(llm_resp, messages, self._tools_schema)
+        final_tools_schema = None if stop_reason == "max_turns" else self._tools_schema
+        llm_resp = self._ensure_final_response(llm_resp, messages, final_tools_schema, tool_context)
+        if stop_reason != "max_turns" and llm_resp.has_content:
+            stop_reason = "completed"
+        elif stop_reason == "completed" and not llm_resp.has_content:
+            stop_reason = "empty_response"
 
         self._print_response(llm_resp)
-        messages.append({"role": "assistant", "content": llm_resp.content or ""})
+        final_output = llm_resp.content or ""
+        messages.append({"role": "assistant", "content": final_output})
+        return self._build_run_result(
+            tool_context=tool_context,
+            final_output=final_output,
+            success=bool(final_output.strip()),
+            stop_reason=stop_reason,
+        )
+
+    def _build_run_result(
+        self,
+        *,
+        tool_context: ToolUseContext | None,
+        final_output: str,
+        success: bool,
+        stop_reason: str,
+    ) -> AgentRunResult:
+        files_modified = list(getattr(tool_context, "files_modified", [])) if tool_context else []
+        turns_used = tool_context.turn_count if tool_context else 0
+        return AgentRunResult(
+            final_output=final_output,
+            success=success,
+            stop_reason=stop_reason,
+            turns_used=turns_used,
+            files_modified=files_modified,
+        )
 
     # ─── 显示 ─────────────────────────────────────────────
 
@@ -120,7 +186,7 @@ class AgentLoop:
 
         # 执行工具 — 只执行解析成功的调用
         if valid_calls:
-            runtime = ToolExecutorRuntime(registry, tool_context)
+            runtime = ToolExecutorRuntime(registry, tool_context, display=self._display)
             valid_results = runtime.execute_batch(valid_calls)
             valid_result_map = {tc.idx: r for tc, r in zip(valid_calls, valid_results)}
         else:
@@ -171,7 +237,7 @@ class AgentLoop:
         messages.extend(tool_results)
 
         # 携带工具结果再次调用 LLM
-        return self._llm.call(messages, tools=self._tools_schema), called_tool_names
+        return self._llm.call(messages, tools=self._tools_schema, display=self._display), called_tool_names
 
     # ─── 空内容恢复 ───────────────────────────────────────
 
@@ -180,6 +246,7 @@ class AgentLoop:
         llm_resp: LLMResponse,
         messages: list[dict[str, Any]],
         tools_schema: list[dict[str, Any]] | None,
+        tool_context: ToolUseContext | None = None,
         max_retries: int = 2,
     ) -> LLMResponse:
         """确保模型产出用户可见的内容。
@@ -221,13 +288,16 @@ class AgentLoop:
             messages.append({"role": "user", "content": follow_up})
 
             try:
-                llm_resp = self._llm.call(messages, tools=tools_schema)
+                llm_resp = self._llm.call(messages, tools=tools_schema, display=self._display)
 
                 # 如果重试后模型要调工具，执行一轮完整的工具循环
                 if llm_resp.is_tool_call and tools_schema:
-                    tool_context = ToolUseContext(working_dir=os.getcwd(), max_turns=MAX_TURNS)
-                    tool_context.set_messages(messages)
-                    llm_resp = self._run_tool_loop(llm_resp, messages, tool_context)
+                    retry_context = tool_context or ToolUseContext(
+                        working_dir=os.getcwd(),
+                        max_turns=MAX_TURNS,
+                    )
+                    retry_context.set_messages(messages)
+                    llm_resp, _ = self._run_tool_loop(llm_resp, messages, retry_context)
 
             except Exception as e:
                 self._renderer.show_error(f"重试失败: {e}")
@@ -245,7 +315,7 @@ class AgentLoop:
         llm_resp: LLMResponse,
         messages: list[dict[str, Any]],
         tool_context: ToolUseContext,
-    ) -> LLMResponse:
+    ) -> tuple[LLMResponse, str]:
         """运行工具调用循环。
 
         退出条件：
@@ -256,6 +326,7 @@ class AgentLoop:
         turn_count = tool_context.turn_count
         empty_retries = 0
         MAX_EMPTY_RETRIES = 3
+        stop_reason = "completed"
 
         while True:
             # 1) 正常工具调用
@@ -270,7 +341,8 @@ class AgentLoop:
                         "role": "user",
                         "content": "你已达到迭代安全上限。请基于当前已收集的信息给出最终回复。",
                     })
-                    llm_resp = self._llm.call(messages, tools=self._tools_schema)
+                    llm_resp = self._llm.call(messages, tools=None, display=self._display)
+                    stop_reason = "max_turns"
                     break
 
                 llm_resp, called_tools = self._execute_tool_turn(llm_resp, messages, tool_context)
@@ -311,13 +383,14 @@ class AgentLoop:
                     "请继续完成你的任务——如果需要读取文件、执行命令或其他操作，请使用工具；"
                     "如果已经完成所有步骤，请给出最终的分析结果和行动建议。"
                 )})
-                llm_resp = self._llm.call(messages, tools=self._tools_schema)
+                llm_resp = self._llm.call(messages, tools=self._tools_schema, display=self._display)
                 continue
 
             # 4) 重试耗尽，退出
+            stop_reason = "empty_response"
             break
 
-        return llm_resp
+        return llm_resp, stop_reason
 
 
 # ─── 向后兼容入口 ─────────────────────────────────────────

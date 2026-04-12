@@ -89,3 +89,40 @@ class RichRenderer:
     def show_status(self, message: str) -> None:
         """显示状态信息（灰色 dim）。"""
         self._console.print(f"[dim]{message}[/dim]")
+
+
+class QuietRenderer:
+    """静默渲染器。
+
+    只解决 renderer 层输出，不负责 suppress llm/runtime 的直接 stdout。
+    """
+
+    def show_thinking(self, title: str, reasoning: str) -> None:
+        pass
+
+    def show_assistant(self, content: str | None) -> None:
+        pass
+
+    def show_timing(self, elapsed: float, prompt_tokens: int, completion_tokens: int, finish_reason: str) -> None:
+        pass
+
+    def show_current_todo(self, item: Any, completed: int, total: int) -> None:
+        pass
+
+    def show_progress(self, items: list[Any]) -> None:
+        pass
+
+    def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
+        pass
+
+    def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
+        pass
+
+    def show_tool_result(self, name: str, output: str) -> None:
+        pass
+
+    def show_error(self, message: str) -> None:
+        pass
+
+    def show_status(self, message: str) -> None:
+        pass
