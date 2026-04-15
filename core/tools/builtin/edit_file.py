@@ -8,45 +8,42 @@ from ..context import ToolUseContext, ToolResult, safe_path
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "edit_file",
-        "description": (
-            "基于字符串替换编辑文件。在文件中查找 old_string 并替换为 new_string。"
-            "\n\n前置条件（系统强制）："
-            "\n- 必须先用 read_file 完整读取目标文件，否则会被拒绝执行（error: not_read）。"
-            "\n- 如果文件在读取后被外部修改，也会被拒绝执行（error: stale），需要重新读取。"
-            "\n- 只读了部分内容（使用了 offset/limit）也不行，必须是完整读取。"
-            "\n\n匹配规则："
-            "\n- old_string 必须与文件内容精确匹配（包括缩进和空行）。"
-            "\n- 默认只替换第一个匹配项。设置 replace_all=true 可替换所有匹配项。"
-            "\n- 如果 old_string 在文件中存在多处匹配且未设置 replace_all，会报错（error: ambiguous_match）。"
-            "\n\n使用场景："
-            "\n- 对文件进行精确、局部的修改（不要用 bash sed/awk，用本工具更安全）"
-            "\n- 如需完全重写文件，请使用 write_file 工具"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "要查找的文本（必须与文件中的内容精确匹配，包括缩进）",
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "替换后的文本",
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "是否替换所有匹配项，默认 false（仅替换第一个）",
-                },
+    "name": "edit_file",
+    "description": (
+        "基于字符串替换编辑文件。在文件中查找 old_string 并替换为 new_string。"
+        "\n\n前置条件（系统强制）："
+        "\n- 必须先用 read_file 完整读取目标文件，否则会被拒绝执行（error: not_read）。"
+        "\n- 如果文件在读取后被外部修改，也会被拒绝执行（error: stale），需要重新读取。"
+        "\n- 只读了部分内容（使用了 offset/limit）也不行，必须是完整读取。"
+        "\n\n匹配规则："
+        "\n- old_string 必须与文件内容精确匹配（包括缩进和空行）。"
+        "\n- 默认只替换第一个匹配项。设置 replace_all=true 可替换所有匹配项。"
+        "\n- 如果 old_string 在文件中存在多处匹配且未设置 replace_all，会报错（error: ambiguous_match）。"
+        "\n\n使用场景："
+        "\n- 对文件进行精确、局部的修改（不要用 bash sed/awk，用本工具更安全）"
+        "\n- 如需完全重写文件，请使用 write_file 工具"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
             },
-            "required": ["path", "old_string", "new_string"],
+            "old_string": {
+                "type": "string",
+                "description": "要查找的文本（必须与文件中的内容精确匹配，包括缩进）",
+            },
+            "new_string": {
+                "type": "string",
+                "description": "替换后的文本",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "是否替换所有匹配项，默认 false（仅替换第一个）",
+            },
         },
+        "required": ["path", "old_string", "new_string"],
     },
 }
 

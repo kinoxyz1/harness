@@ -1,16 +1,9 @@
-"""Todo 管理工具。
-
-LLM 主动调用 todo_manage 来更新任务计划。
-传入完整任务列表替换旧列表（非增量更新）。
-"""
-
-# 注意：此模块使用模块级单例状态。
-# 当前设计假设工具调用是串行执行的（由 ToolExecutorRuntime 保证）。
-# 如果未来需要并行执行，需要添加线程锁保护。
+"""Todo 管理工具。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
+
+from core.session.state import TodoItem, TodoState
 
 from ..context import ToolResult, ToolUseContext
 
@@ -18,35 +11,49 @@ from ..context import ToolResult, ToolUseContext
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "todo",
-        "description": "Rewrite the current session plan for multi-step work.",
-        "parameters": {
-            "type": "object",
-            "properties": {
+    "name": "todo",
+    "description": (
+        "Rewrite the current session plan for non-trivial multi-step work. "
+        "Use this early for tasks that require multiple actions, especially after a skill was just expanded. "
+        "Mirror the active workflow instead of collapsing it into 1-2 vague items. "
+        "Keep exactly one in_progress item whenever active work exists. "
+        "Update the plan as tasks complete or scope changes. "
+        "If validation is required, include an explicit verification task. "
+        "Preserve meaningful workflow labels such as 2.5 when they are real and relevant."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
                 "items": {
                     "type": "array",
-                    "description": "完整的任务列表（替换旧列表）",
+                    "description": "完整任务列表（全量覆盖当前计划）",
                     "items": {
                         "type": "object",
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "任务描述",
+                                "description": "给用户看的祈使句任务描述",
+                            },
+                            "active_form": {
+                                "type": "string",
+                                "description": "进行时形式，用于显示当前聚焦工作",
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "failed"],
-                                "description": "任务状态",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "任务状态（pending|in_progress|completed）",
+                            },
+                            "workflow_ref": {
+                                "type": "string",
+                                "description": "可选的工作流标签，如 2.5",
+                                "nullable": True,
                             },
                         },
-                        "required": ["content", "status"],
+                        "required": ["content", "active_form", "status"],
                     },
                 },
             },
-            "required": ["items"],
-        },
+        "required": ["items"],
     },
 }
 
@@ -61,42 +68,43 @@ ANNOTATIONS: dict[str, bool] = {
     "concurrency_safe": False,  # 修改内部状态，串行执行
 }
 
-# ─── 内部状态（模块级单例）───────────────────────────
-
-@dataclass
-class PlanItem:
-    content: str
-    status: str = "pending"
-
-
-@dataclass
-class PlanningState:
-    items: list[PlanItem] = field(default_factory=list)
-    rounds_since_update: int = 0
-
-
-_state = PlanningState()
+# 兼容层：保留只读查询 API，指向最近一次成功写入的 session todo_state。
+_latest_todo_state: TodoState | None = None
 
 
 # ─── 内部逻辑 ───────────────────────────────────────
 
-MAX_ITEMS = 12
-VALID_STATUSES = {"pending", "in_progress", "completed", "failed"}
+MAX_ITEMS = 20
+VALID_STATUSES = {"pending", "in_progress", "completed"}
 
 
-def _validate_items(items: list[dict]) -> tuple[bool, str]:
+def _validate_items(items: Any) -> tuple[bool, str]:
     """验证任务列表。返回 (是否通过, 错误信息)。"""
+    if not isinstance(items, list):
+        return False, "items 必须是数组"
     if len(items) > MAX_ITEMS:
         return False, f"任务数量超过限制：最多 {MAX_ITEMS} 个任务"
 
     in_progress_count = 0
     for i, item in enumerate(items):
-        if "content" not in item or not item["content"].strip():
+        if not isinstance(item, dict):
+            return False, f"第 {i+1} 项必须是对象"
+
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
             return False, f"第 {i+1} 项缺少 content"
+
+        active_form = item.get("active_form")
+        if not isinstance(active_form, str) or not active_form.strip():
+            return False, f"第 {i+1} 项缺少 active_form"
 
         status = item.get("status")
         if status not in VALID_STATUSES:
             return False, f"第 {i+1} 项 status 无效: {status}"
+
+        workflow_ref = item.get("workflow_ref")
+        if workflow_ref is not None and not isinstance(workflow_ref, str):
+            return False, f"第 {i+1} 项 workflow_ref 必须是字符串或 null"
 
         if status == "in_progress":
             in_progress_count += 1
@@ -107,7 +115,7 @@ def _validate_items(items: list[dict]) -> tuple[bool, str]:
     return True, ""
 
 
-def _render_progress(items: list[PlanItem]) -> str:
+def _render_progress(items: list[TodoItem]) -> str:
     """渲染进度文本（给 LLM 看，精简版）。"""
     if not items:
         return "计划已清空。"
@@ -125,56 +133,75 @@ def _render_progress(items: list[PlanItem]) -> str:
 # ─── Handler（执行逻辑）─────────────────────────────
 
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-    """处理 todo_manage 调用，更新任务状态。"""
-    items_data = args.get("items", [])
+    """处理 todo 调用，更新任务状态。"""
+    state = context.session_state
+    if state is None:
+        return ToolResult(output="No session state available", success=False, error="no_state")
+
+    if not isinstance(args, dict):
+        return ToolResult(output="参数错误: args 必须是对象", success=False, error="validation_failed")
+
+    items_data = args.get("items")
 
     # 验证
     valid, error = _validate_items(items_data)
     if not valid:
         return ToolResult(output=f"参数错误: {error}", success=False, error="validation_failed")
 
-    # 替换内部状态
-    _state.items = [PlanItem(content=item["content"], status=item["status"]) for item in items_data]
-    _state.rounds_since_update = 0
+    # 写入 session state
+    items = [
+        TodoItem(
+            content=item["content"].strip(),
+            active_form=item["active_form"].strip(),
+            status=item["status"],
+            workflow_ref=(item.get("workflow_ref") or None),
+        )
+        for item in items_data
+    ]
+
+    if items and all(item.status == "completed" for item in items):
+        state.todo_state.items = []
+        state.todo_state.last_completed_items = items
+    else:
+        state.todo_state.items = items
+        state.todo_state.last_completed_items = []
+    state.todo_state.last_write_turn = context.turn_count
+
+    # 兼容层记录最近一次会话级 todo 状态（只读快照由 get_state 提供）。
+    global _latest_todo_state
+    _latest_todo_state = state.todo_state
 
     # 返回渲染后的进度
-    output = _render_progress(_state.items)
+    output = _render_progress(state.todo_state.items)
     return ToolResult(output=output, success=True)
 
 
 # ─── 对外暴露的 API（供 AgentLoop 使用）──────────────
 
-def get_state() -> PlanningState:
+def get_state() -> TodoState:
     """获取当前规划状态（供 AgentLoop 查询）。"""
-    return _state
-
-
-def save_snapshot() -> PlanningState:
-    """保存当前 todo 状态快照。"""
-    return PlanningState(
-        items=[PlanItem(content=item.content, status=item.status) for item in _state.items],
-        rounds_since_update=_state.rounds_since_update,
+    source = _latest_todo_state
+    if source is None:
+        return TodoState()
+    return TodoState(
+        items=[
+            TodoItem(
+                content=item.content,
+                active_form=item.active_form,
+                status=item.status,
+                workflow_ref=item.workflow_ref,
+            )
+            for item in source.items
+        ],
+        last_completed_items=[
+            TodoItem(
+                content=item.content,
+                active_form=item.active_form,
+                status=item.status,
+                workflow_ref=item.workflow_ref,
+            )
+            for item in source.last_completed_items
+        ],
+        last_write_turn=source.last_write_turn,
+        last_reminder_turn=source.last_reminder_turn,
     )
-
-
-def restore_snapshot(snapshot: PlanningState) -> None:
-    """恢复 todo 状态快照。"""
-    _state.items = [PlanItem(content=item.content, status=item.status) for item in snapshot.items]
-    _state.rounds_since_update = snapshot.rounds_since_update
-
-
-def clear_state() -> None:
-    """清空当前 todo 状态。"""
-    _state.items = []
-    _state.rounds_since_update = 0
-
-
-def increment_rounds() -> int:
-    """递增 rounds_since_update，返回新值。"""
-    _state.rounds_since_update += 1
-    return _state.rounds_since_update
-
-
-def reset_rounds() -> None:
-    """重置 rounds_since_update 为 0。"""
-    _state.rounds_since_update = 0

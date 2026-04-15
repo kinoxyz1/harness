@@ -11,6 +11,7 @@ class ModelResponse:
     finish_reason: str = "stop"
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    reasoning: str = ""
 
     @property
     def has_final_text(self) -> bool:

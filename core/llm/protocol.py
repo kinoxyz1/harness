@@ -1,139 +1,132 @@
-"""消息规范化层：将内部消息列表转换为 API 可接受的格式。
+"""消息规范化层：将内部消息列表转换为 Anthropic messages 协议格式。
 
 解决三类问题：
-1. 内部字段泄漏（reasoning_content 等不应发送到 API）
-2. tool_call / tool_result 配对缺失（如 MAX_TURNS 截断后缺少 result）
-3. 角色交替违反（连续同角色消息）
+1. system 独立抽离为顶层参数
+2. 内部 tool_calls / tool role 转换为 Anthropic tool_use / tool_result block
+3. 角色交替、未闭合工具调用的修正
 
-参考：learn-claude-code s02 消息规范化。
+内部消息格式（方案 A）：
+- assistant: {"role": "assistant", "content": "...", "tool_calls": [...]}
+- tool: {"role": "tool", "tool_call_id": "...", "content": "..."}
+
+Anthropic API 格式：
+- system: 顶层参数
+- messages: 只有 user/assistant，tool_result 嵌入 user.content[]
 """
 from __future__ import annotations
 
 from typing import Any
 
-# API 不接受的字段黑名单
-_STRIP_FIELDS = {"reasoning_content", "refusal", "annotations"}
 
-
-def normalize_messages(messages: list[dict[str, Any]], enable_thinking: bool = False) -> list[dict[str, Any]]:
-    """将内部消息列表规范化为 OpenAI 兼容 API 可接受的格式。
-
-    原则：messages 是系统的内部表示，API 看到的是规范化后的副本。
-    两者不是同一个东西。
-
-    Args:
-        messages: 内部消息列表
-        enable_thinking: 是否保留 reasoning_content（思考模型如 kimi 需要）
+def normalize_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """将内部消息列表规范化为 Anthropic API 格式。
 
     Returns:
-        全新的消息列表，不修改原始 messages。
+        (system, messages) 二元组。
+        system: 合并后的系统提示词（可能为空字符串）。
+        messages: 仅包含 user/assistant 角色的 Anthropic 格式消息列表。
     """
-    result: list[dict[str, Any]] = []
-
+    # 1. 分离 system
+    system_parts: list[str] = []
+    non_system: list[dict[str, Any]] = []
     for msg in messages:
-        clean = _clean_message(msg, enable_thinking)
-        if clean:
-            result.append(clean)
-
-    # 确保 tool_call / tool_result 配对
-    result = _pair_tool_results(result)
-
-    # 合并连续同角色消息
-    result = _merge_consecutive_roles(result)
-
-    return result
-
-
-def _clean_message(msg: dict[str, Any], enable_thinking: bool = False) -> dict[str, Any] | None:
-    """清洗单条消息：只保留协议认可的字段。"""
-    role = msg.get("role")
-    if role not in ("system", "user", "assistant", "tool"):
-        return None
-
-    clean: dict[str, Any] = {"role": role}
-
-    if role == "system":
-        content = msg.get("content")
-        if content:
-            clean["content"] = content
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if content:
+                system_parts.append(content)
         else:
-            return None  # 空 system 消息无意义
+            non_system.append(msg)
 
-    elif role == "user":
-        content = msg.get("content")
-        if content:
-            clean["content"] = content
-        else:
-            return None  # 空 user 消息会破坏角色交替
+    system = "\n\n".join(system_parts)
 
-    elif role == "assistant":
-        content = msg.get("content")
-        if content is not None:
-            clean["content"] = content
-        # 保留 tool_calls（即使 content 为空，有 tool_calls 就有意义）
-        tool_calls = msg.get("tool_calls")
-        if tool_calls:
-            clean["tool_calls"] = [
-                {k: v for k, v in tc.items() if k not in _STRIP_FIELDS}
-                for tc in tool_calls
-            ]
-        # 思考模型（kimi-k2-thinking 等）要求：
-        # assistant 消息带 tool_calls 时必须有 reasoning_content 字段
-        if enable_thinking:
-            reasoning = msg.get("reasoning_content")
-            if reasoning is not None:
-                clean["reasoning_content"] = reasoning
-            elif tool_calls:
-                # kimi 要求非 null，用空字符串占位
-                clean["reasoning_content"] = ""
-        # 既没有 content 也没有 tool_calls → 空消息，跳过
-        if "content" not in clean and "tool_calls" not in clean:
-            return None
+    # 2. 转换内部消息为 Anthropic 格式
+    converted: list[dict[str, Any]] = []
+    for msg in non_system:
+        role = msg.get("role")
+        if role == "user":
+            converted.append(_convert_user(msg))
+        elif role == "assistant":
+            converted.append(_convert_assistant(msg))
+        elif role == "tool":
+            converted.append(msg)  # 保留原始，后续处理
 
-    elif role == "tool":
-        tool_call_id = msg.get("tool_call_id")
-        if not tool_call_id:
-            return None  # 没有 tool_call_id 的 tool 消息无效
-        clean["tool_call_id"] = tool_call_id
-        clean["content"] = msg.get("content") or ""
+    # 3. 补齐未闭合的 tool_use
+    converted = _pair_tool_results(converted)
 
-    return clean
+    # 4. 把连续 tool 消息合并为 user + tool_result blocks
+    converted = _merge_tool_results(converted)
+
+    # 5. 合并连续同角色消息
+    converted = _merge_consecutive_roles(converted)
+
+    return system, converted
+
+
+def _convert_user(msg: dict[str, Any]) -> dict[str, Any]:
+    """转换内部 user 消息。"""
+    return {"role": "user", "content": msg.get("content", "")}
+
+
+def _convert_assistant(msg: dict[str, Any]) -> dict[str, Any]:
+    """转换内部 assistant 消息，把 tool_calls 转为 tool_use blocks。"""
+    content_blocks: list[dict[str, Any]] = []
+
+    text = msg.get("content")
+    if text:
+        content_blocks.append({"type": "text", "text": text})
+
+    tool_calls = msg.get("tool_calls")
+    if tool_calls:
+        for tc in tool_calls:
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc["id"],
+                "name": tc["name"],
+                "input": tc.get("args", {}),
+            })
+
+    return {
+        "role": "assistant",
+        "content": content_blocks if content_blocks else "",
+    }
 
 
 def _pair_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """确保每个 tool_call 都有匹配的 tool_result。
+    """确保每个 tool_use block 都有匹配的 tool_result。
 
-    遍历所有 assistant 消息中的 tool_calls，收集已有 tool_result 的 ID，
-    为缺失的 ID 插入占位 result。
+    为缺失的 tool_use 插入 (cancelled) 占位 tool 消息。
+    仅在列表中存在至少一条 tool 消息时才补齐（否则视为纯转换场景）。
     """
-    # 收集已有 tool_result 的 ID
+    # 收集已有 tool_result 的 ID，同时判断是否存在 tool 消息
+    has_tool_messages = False
     paired_ids: set[str] = set()
     for msg in messages:
         if msg.get("role") == "tool":
+            has_tool_messages = True
             tc_id = msg.get("tool_call_id")
             if tc_id:
                 paired_ids.add(tc_id)
 
-    # 找出缺失的 tool_call，记录需要插入的位置
+    if not has_tool_messages:
+        return messages
+
     insertions: list[tuple[int, dict[str, Any]]] = []
     for i, msg in enumerate(messages):
         if msg.get("role") != "assistant":
             continue
-        tool_calls = msg.get("tool_calls")
-        if not tool_calls:
+        content = msg.get("content")
+        if not isinstance(content, list):
             continue
-        for tc in tool_calls:
-            tc_id = tc.get("id")
-            if tc_id and tc_id not in paired_ids:
-                # 在 assistant 消息之后插入占位 result
-                insertions.append((
-                    i + 1 + len(insertions),  # 补偿之前插入的偏移
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": "(cancelled)",
-                    },
-                ))
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tc_id = block.get("id")
+                if tc_id and tc_id not in paired_ids:
+                    insertions.append((
+                        i + 1 + len(insertions),
+                        {"role": "tool", "tool_call_id": tc_id, "content": "(cancelled)"},
+                    ))
 
     for idx, placeholder in insertions:
         messages.insert(idx, placeholder)
@@ -141,12 +134,37 @@ def _pair_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return messages
 
 
-def _merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """合并连续同角色消息。
+def _merge_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把连续的内部 tool 消息聚合为一条 user 消息中的多个 tool_result block。"""
+    result: list[dict[str, Any]] = []
+    tool_buffer: list[dict[str, Any]] = []
 
-    OpenAI 要求 user/assistant 严格交替（tool 消息可连续）。
-    连续 user 消息合并内容；连续 assistant 消息合并内容和 tool_calls。
-    """
+    def flush_buffer():
+        if tool_buffer:
+            blocks = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": msg["tool_call_id"],
+                    "content": msg.get("content", ""),
+                }
+                for msg in tool_buffer
+            ]
+            result.append({"role": "user", "content": blocks})
+            tool_buffer.clear()
+
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tool_buffer.append(msg)
+        else:
+            flush_buffer()
+            result.append(msg)
+
+    flush_buffer()
+    return result
+
+
+def _merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """合并连续同角色消息（Anthropic 要求 user/assistant 交替）。"""
     if not messages:
         return messages
 
@@ -154,25 +172,34 @@ def _merge_consecutive_roles(messages: list[dict[str, Any]]) -> list[dict[str, A
 
     for msg in messages[1:]:
         prev = merged[-1]
-
-        # tool 消息可连续出现（多个 tool_result）
-        if msg["role"] == "tool":
-            merged.append(msg)
-            continue
-
-        # 同角色合并
-        if msg["role"] == prev["role"]:
-            if msg["role"] == "user":
-                prev["content"] = (prev.get("content") or "") + "\n" + (msg.get("content") or "")
-            elif msg["role"] == "assistant":
-                # 合并 content
-                if msg.get("content"):
-                    prev["content"] = (prev.get("content") or "") + (msg.get("content") or "")
-                # 合并 tool_calls
-                if msg.get("tool_calls"):
-                    prev.setdefault("tool_calls", []).extend(msg["tool_calls"])
-            # system 角色不应连续，保留第一个
+        if msg["role"] == prev["role"] == "user":
+            prev_content = prev.get("content", "")
+            msg_content = msg.get("content", "")
+            if isinstance(prev_content, str) and isinstance(msg_content, str):
+                prev["content"] = prev_content + "\n" + msg_content
+            else:
+                prev["content"] = _to_blocks(prev_content) + _to_blocks(msg_content)
+        elif msg["role"] == prev["role"] == "assistant":
+            prev_content = prev.get("content", "")
+            msg_content = msg.get("content", "")
+            if isinstance(prev_content, list) and isinstance(msg_content, list):
+                prev["content"] = prev_content + msg_content
+            elif isinstance(prev_content, list):
+                prev["content"] = prev_content + [{"type": "text", "text": msg_content or ""}]
+            elif isinstance(msg_content, list):
+                prev["content"] = [{"type": "text", "text": prev_content or ""}] + msg_content
+            else:
+                prev["content"] = (prev_content or "") + (msg_content or "")
         else:
             merged.append(msg)
 
     return merged
+
+
+def _to_blocks(content: Any) -> list[dict[str, Any]]:
+    """将 content 转为 block 列表。"""
+    if isinstance(content, list):
+        return content
+    if isinstance(content, str) and content:
+        return [{"type": "text", "text": content}]
+    return []

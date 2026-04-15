@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
-from .context import ToolResult, ToolUseContext
+from .context import ContextPatch, ExecutionBarrier, ToolResult, ToolUseContext
 from ..shared.config import MAX_OUTPUT_CHARS
 from ..shared.run_options import RunDisplayOptions
 
@@ -32,6 +32,10 @@ class ToolBatchResult:
     tool_results: list[dict[str, Any]]
     files_modified: list[str]
     tool_names: list[str]
+    injected_messages: list[dict[str, Any]]
+    context_patches: list[ContextPatch]
+    barrier: ExecutionBarrier | None
+    tool_successes: list[bool] | None = None
 
 
 @dataclass
@@ -50,15 +54,24 @@ class ToolExecutorRuntime:
         registry,
         context: ToolUseContext,
         display: RunDisplayOptions | None = None,
+        renderer=None,
     ):
         self._registry = registry
         self._context = context
         self._display = display or RunDisplayOptions()
+        self._renderer = renderer
 
     def execute_batch(self, tool_calls: list[ToolCall]) -> ToolBatchResult:
         """接收一批 tool_call，分批执行，返回有序结果。"""
         if not tool_calls:
-            return ToolBatchResult(tool_results=[], files_modified=[], tool_names=[])
+            return ToolBatchResult(
+                tool_results=[], files_modified=[], tool_names=[],
+                injected_messages=[], context_patches=[], barrier=None, tool_successes=[],
+            )
+
+        # If any call is a skill tool, use sequential barrier-aware execution
+        if any(call.name == "skill" for call in tool_calls):
+            return self._execute_with_barrier(tool_calls)
 
         batches = self._partition(tool_calls)
         all_results: dict[int, ToolResult] = {}
@@ -84,6 +97,10 @@ class ToolExecutorRuntime:
 
         ordered_calls = tool_calls
         ordered_results = [all_results[i] for i in range(len(tool_calls))]
+        if self._renderer is not None and not self._display.quiet:
+            for call, result in zip(ordered_calls, ordered_results):
+                self._renderer.show_tool_call(call.name, call.args)
+                self._renderer.show_tool_result(call.name, result.output)
         tool_messages = [
             {
                 "role": "tool",
@@ -92,10 +109,84 @@ class ToolExecutorRuntime:
             }
             for call, result in zip(ordered_calls, ordered_results)
         ]
+
+        # Collect injected_messages, context_patches, and barrier from results
+        injected_messages: list[dict[str, Any]] = []
+        context_patches: list[ContextPatch] = []
+        barrier: ExecutionBarrier | None = None
+        for result in all_results.values():
+            injected_messages.extend(result.injected_messages)
+            if result.context_patch is not None:
+                context_patches.append(result.context_patch)
+            if result.barrier is not None and result.barrier.stop_after_tool:
+                barrier = result.barrier
+
         return ToolBatchResult(
             tool_results=tool_messages,
             files_modified=self._context.files_modified,
             tool_names=[call.name for call in ordered_calls],
+            injected_messages=injected_messages,
+            context_patches=context_patches,
+            barrier=barrier,
+            tool_successes=[result.success for result in ordered_results],
+        )
+
+    def _execute_with_barrier(self, tool_calls: list[ToolCall]) -> ToolBatchResult:
+        """Execute tool calls sequentially with barrier awareness.
+
+        If a tool returns a barrier, subsequent calls get skipped results.
+        """
+        ordered_results: dict[int, ToolResult] = {}
+        injected_messages: list[dict[str, Any]] = []
+        context_patches: list[ContextPatch] = []
+        barrier: ExecutionBarrier | None = None
+
+        if not self._display.quiet:
+            sys.stdout.write(f"\033[36m[Runtime] 收到 {len(tool_calls)} 个 tool_call（含 skill，顺序执行）\033[0m\n")
+
+        for pos, call in enumerate(tool_calls):
+            if barrier is not None:
+                # This and all subsequent calls are skipped
+                ordered_results[call.idx] = ToolResult(
+                    output=f"(skipped: superseded by {barrier.reason} barrier; re-issue after re-evaluation if still needed)",
+                    success=False,
+                    error="skipped",
+                )
+                continue
+
+            result = self._run_single(call)
+            ordered_results[call.idx] = result
+            injected_messages.extend(result.injected_messages)
+            if result.context_patch is not None:
+                context_patches.append(result.context_patch)
+            if result.barrier is not None and result.barrier.stop_after_tool:
+                barrier = result.barrier
+
+        # Build tool result messages
+        tool_messages = [
+            {
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "content": ordered_results[call.idx].output,
+            }
+            for call in tool_calls
+        ]
+
+        # Render results
+        if self._renderer is not None and not self._display.quiet:
+            for call in tool_calls:
+                result = ordered_results[call.idx]
+                self._renderer.show_tool_call(call.name, call.args)
+                self._renderer.show_tool_result(call.name, result.output)
+
+        return ToolBatchResult(
+            tool_results=tool_messages,
+            files_modified=self._context.files_modified,
+            tool_names=[call.name for call in tool_calls],
+            injected_messages=injected_messages,
+            context_patches=context_patches,
+            barrier=barrier,
+            tool_successes=[ordered_results[call.idx].success for call in tool_calls],
         )
 
     def _partition(self, calls: list[ToolCall]) -> list[_Batch]:
@@ -145,6 +236,21 @@ class ToolExecutorRuntime:
             if not self._display.quiet:
                 sys.stdout.write(f"\033[36m[Runtime] ▶ 串行执行写工具：{call.name}\033[0m\n")
             results[call.idx] = self._run_single(call)
+            if (
+                call.name == "todo"
+                and results[call.idx].success
+                and self._renderer is not None
+                and not self._display.quiet
+            ):
+                todo_state = getattr(self._context.session_state, "todo_state", None)
+                if todo_state is not None and todo_state.items:
+                    self._renderer.show_progress(todo_state.items)
+                elif todo_state is not None and todo_state.last_completed_items:
+                    self._renderer.show_completion_summary(
+                        completed=len(todo_state.last_completed_items),
+                        total=len(todo_state.last_completed_items),
+                        elapsed=0.0,
+                    )
         return results
 
     def _run_single(self, call: ToolCall) -> ToolResult:
@@ -166,6 +272,9 @@ class ToolExecutorRuntime:
                         success=result.success,
                         error=result.error,
                         truncated=True,
+                        injected_messages=result.injected_messages,
+                        context_patch=result.context_patch,
+                        barrier=result.barrier,
                     )
                 result_holder.append(result)
             except Exception as e:

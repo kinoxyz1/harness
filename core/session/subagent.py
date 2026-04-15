@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from ..prompt.system_context import get_system_context, get_user_context
 from ..llm.client import ModelGateway
-from ..llm.openai_client import OpenAIClient
+from ..llm.anthropic_client import AnthropicClient
 from ..policy.base import PolicyRunner
 from ..policy.max_turns import MaxTurnsPolicy
 from ..query.recovery import RecoveryManager
@@ -132,7 +132,7 @@ def get_subagent_definition(agent_type: SubagentType) -> SubagentDefinition:
 def _compute_allowed_names(definition: SubagentDefinition) -> set[str]:
     """根据子代理定义计算允许的工具名集合。"""
     if definition.allowed_tools is None:
-        allowed_names = {schema["function"]["name"] for schema in registry.schemas()}
+        allowed_names = {schema["name"] for schema in registry.schemas()}
     else:
         allowed_names = set(definition.allowed_tools)
     allowed_names -= set(definition.disallowed_tools)
@@ -175,7 +175,7 @@ class SubagentRuntime:
         tools_registry=registry,
     ) -> None:
         self._parent_context = parent_context
-        self._llm_factory = llm_factory or OpenAIClient
+        self._llm_factory = llm_factory or AnthropicClient
         self._tools_registry = tools_registry
 
     def run(self, request: SubagentRequest) -> SubagentRunResult:

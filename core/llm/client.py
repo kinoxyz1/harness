@@ -27,4 +27,5 @@ class ModelGateway:
             finish_reason=response.finish_reason,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
+            reasoning=response.reasoning or "",
         )

@@ -101,9 +101,9 @@ harness/
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DASHSCOPE_API_KEY` | （必填） | API Key |
-| `LLM_MODEL` | `glm-4.6` | 模型名称 |
-| `LLM_BASE_URL` | DashScope | API 地址（兼容 OpenAI 格式） |
+| `ANTHROPIC_API_KEY` | （必填） | Anthropic API Key |
+| `ANTHROPIC_MODEL` | `kimi-k2.5` | 模型 ID |
+| `ANTHROPIC_BASE_URL` | （空） | 可选，用于兼容 Anthropic 协议的服务 |
 | `LLM_MAX_TOKENS` | `8192` | 单次请求最大输出 token |
 | `LLM_ENABLE_THINKING` | `true` | 启用推理模式 |
 | `LLM_SHOW_THINKING` | `true` | 显示推理过程 |
@@ -112,16 +112,14 @@ harness/
 
 ### 支持的模型
 
-只要 API 兼容 OpenAI 格式就能用。已测试：
+只要 API 兼容 Anthropic messages 协议就能用。已测试：
 
-| 模型 | Provider    | todo 工具 |
-|------|-------------|-----------|
-| glm-4.6 | 百炼-glm      | ✅ 主动使用 |
-| kimi-k2-thinking | 百炼-kimi     | ✅ 主动使用 |
-| deepseek-v3.2 | 百炼-deepseek | ⚠️ 需提醒后使用 |
-| qwen-max | 百炼          | ⚠️ 需提醒后使用 |
+| 模型 | Provider | 说明 |
+|------|----------|------|
+| claude-sonnet-4-6 | Anthropic 官方 | 推荐模型 |
+| claude-opus-4-6 | Anthropic 官方 | 高能力模型 |
 
-切换模型只需修改 `.env` 中的 `LLM_MODEL` 和 `LLM_BASE_URL`。
+切换模型只需修改 `.env` 中的 `ANTHROPIC_MODEL` 和 `ANTHROPIC_BASE_URL`。
 
 ### 自定义 AI 行为
 
@@ -142,17 +140,14 @@ from typing import Any
 from . import ToolResult, ToolUseContext
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "my_tool",
-        "description": "这个工具做什么",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "input": {"type": "string", "description": "输入参数"},
-            },
-            "required": ["input"],
+    "name": "my_tool",
+    "description": "这个工具做什么",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "input": {"type": "string", "description": "输入参数"},
         },
+        "required": ["input"],
     },
 }
 
@@ -168,7 +163,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
 **3. 测试：**
 
 ```bash
-python -c "from core.tools import registry; print([s['function']['name'] for s in registry.schemas()])"
+python -c "from core.tools import registry; print([s['name'] for s in registry.schemas()])"
 ```
 
 ## 运行测试

@@ -8,41 +8,38 @@ from ..context import FileState, ToolUseContext, ToolResult, safe_path
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "read_file",
-        "description": (
-            "读取本地文件的文本内容。只读工具，不会修改文件。"
-            "\n\n行为要点："
-            "\n- 输出带行号，格式与 cat -n 一致。"
-            "\n- 单次最多读取 2000 行，大文件请用 offset 和 limit 分段读取。"
-            "\n- 检测到二进制文件时会拒绝读取。"
-            "\n- 路径支持相对路径（基于工作目录）和绝对路径。"
-            "\n\n重要：edit_file 强制要求先完整读取文件后才能编辑。"
-            "如果只读了部分内容（使用了 offset/limit），edit_file 也会拒绝执行。"
-            "\n\n使用场景："
-            "\n- 查看文件内容（不要用 bash cat/head/tail，用本工具更安全）"
-            "\n- 编辑前必须先读取文件"
-            "\n- 搜索文件路径不确定时，先用 find 工具定位"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "从第几行开始读取（从 1 开始），默认为 1",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "最多读取的行数，默认读取全部（最大 2000 行）",
-                },
+    "name": "read_file",
+    "description": (
+        "读取本地文件的文本内容。只读工具，不会修改文件。"
+        "\n\n行为要点："
+        "\n- 输出带行号，格式与 cat -n 一致。"
+        "\n- 单次最多读取 2000 行，大文件请用 offset 和 limit 分段读取。"
+        "\n- 检测到二进制文件时会拒绝读取。"
+        "\n- 路径支持相对路径（基于工作目录）和绝对路径。"
+        "\n\n重要：edit_file 强制要求先完整读取文件后才能编辑。"
+        "如果只读了部分内容（使用了 offset/limit），edit_file 也会拒绝执行。"
+        "\n\n使用场景："
+        "\n- 查看文件内容（不要用 bash cat/head/tail，用本工具更安全）"
+        "\n- 编辑前必须先读取文件"
+        "\n- 搜索文件路径不确定时，先用 find 工具定位"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
             },
-            "required": ["path"],
+            "offset": {
+                "type": "integer",
+                "description": "从第几行开始读取（从 1 开始），默认为 1",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "最多读取的行数，默认读取全部（最大 2000 行）",
+            },
         },
+        "required": ["path"],
     },
 }
 

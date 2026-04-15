@@ -1,13 +1,41 @@
 """显示渲染实现。"""
 from __future__ import annotations
 
+from itertools import islice
 from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 
-from .shared.interfaces import Renderer
-from .shared.config import SHOW_THINKING
+from ..shared.interfaces import Renderer
+from ..shared.config import SHOW_THINKING
+
+
+def _summarize_tool_args(name: str, args: dict[str, Any]) -> str:
+    if name == "bash" and args.get("command"):
+        return str(args["command"])
+
+    preferred_keys = ("path", "pattern", "query", "task", "offset", "limit")
+    parts = [f"{key}={args[key]!r}" for key in preferred_keys if key in args]
+    if not parts:
+        return name
+    return f"{name} " + " ".join(parts)
+
+
+def _preview_output(output: str, *, max_lines: int = 10, max_chars: int = 1200) -> str:
+    if not output:
+        return "(无输出)"
+
+    lines = output.splitlines()
+    preview_lines = list(islice(lines, max_lines))
+    preview = "\n".join(preview_lines)
+    truncated = len(lines) > max_lines or len(output) > max_chars
+    if len(preview) > max_chars:
+        preview = preview[:max_chars]
+        truncated = True
+    if truncated:
+        preview += "\n... (已省略后续输出)"
+    return preview
 
 
 class RichRenderer:
@@ -52,16 +80,20 @@ class RichRenderer:
             if status in ("completed", "COMPLETED"):
                 icon = "[green]✅[/green]"
                 style = "[dim]"
+                label = item.content
             elif status in ("in_progress", "IN_PROGRESS"):
                 icon = "[yellow]⚡[/yellow]"
                 style = "[bold]"
+                label = item.active_form or item.content
             elif status in ("failed", "FAILED"):
                 icon = "[red]❌[/red]"
                 style = ""
+                label = item.content
             else:
                 icon = "[dim]⬜[/dim]"
                 style = "[dim]"
-            self._console.print(f"  {icon} {style}{i}. {item.content}[/]")
+                label = item.content
+            self._console.print(f"  {icon} {style}{i}. {label}[/]")
         self._console.print("")
 
     def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
@@ -76,11 +108,11 @@ class RichRenderer:
 
     def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
         """显示工具调用开始。"""
-        self._console.print(f"\n[yellow]$ {args.get('command', name)}[/yellow]")
+        self._console.print(f"\n[yellow]$ {_summarize_tool_args(name, args)}[/yellow]")
 
     def show_tool_result(self, name: str, output: str) -> None:
         """显示工具执行结果。"""
-        print(output)
+        self._console.print(_preview_output(output))
 
     def show_error(self, message: str) -> None:
         """显示错误信息。"""

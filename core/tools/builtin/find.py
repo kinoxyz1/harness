@@ -9,39 +9,36 @@ from ..context import ToolUseContext, ToolResult
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "find",
-        "description": (
-            "按 glob 模式搜索文件路径。只读工具，可安全并行执行。"
-            "\n\n行为要点："
-            "\n- 返回匹配的文件列表，按修改时间排序（最近修改的在前）。"
-            "\n- 最多返回 200 个结果，超出部分截断。"
-            "\n- 输出相对路径（相对于搜索目录）。"
-            "\n\n模式语法（Python pathlib glob）："
-            "\n- `*.py` — 当前目录下的 Python 文件"
-            "\n- `**/*.py` — 递归搜索所有 Python 文件"
-            "\n- `src/**/*.ts` — src 目录下递归搜索 TypeScript 文件"
-            "\n- `path` 参数可指定搜索根目录，默认为当前工作目录"
-            "\n\n使用场景："
-            "\n- 查找特定类型的文件（不要用 bash find/ls，用本工具更高效）"
-            "\n- 确认文件路径是否存在"
-            "\n- 浏览项目结构"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "find 匹配模式，如 '**/*.py' 匹配所有 Python 文件",
-                },
-                "path": {
-                    "type": "string",
-                    "description": "搜索的根目录，默认为当前工作目录",
-                },
+    "name": "find",
+    "description": (
+        "按 glob 模式搜索文件路径。只读工具，可安全并行执行。"
+        "\n\n行为要点："
+        "\n- 返回匹配的文件列表，按修改时间排序（最近修改的在前）。"
+        "\n- 最多返回 200 个结果，超出部分截断。"
+        "\n- 输出相对路径（相对于搜索目录）。"
+        "\n\n模式语法（Python pathlib glob）："
+        "\n- `*.py` — 当前目录下的 Python 文件"
+        "\n- `**/*.py` — 递归搜索所有 Python 文件"
+        "\n- `src/**/*.ts` — src 目录下递归搜索 TypeScript 文件"
+        "\n- `path` 参数可指定搜索根目录，默认为当前工作目录"
+        "\n\n使用场景："
+        "\n- 查找特定类型的文件（不要用 bash find/ls，用本工具更高效）"
+        "\n- 确认文件路径是否存在"
+        "\n- 浏览项目结构"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "find 匹配模式，如 '**/*.py' 匹配所有 Python 文件",
             },
-            "required": ["pattern"],
+            "path": {
+                "type": "string",
+                "description": "搜索的根目录，默认为当前工作目录",
+            },
         },
+        "required": ["pattern"],
     },
 }
 

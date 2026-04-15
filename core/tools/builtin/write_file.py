@@ -8,45 +8,42 @@ from ..context import ToolUseContext, ToolResult, safe_path
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "write_file",
-        "description": (
-            "将内容写入文件。支持创建、覆盖和追加三种模式。"
-            "\n\n行为要点："
-            "\n- mode='write'（默认）：完全覆盖文件，如不存在则自动创建（包括父目录）。"
-            "\n- mode='append'：在文件末尾追加内容，如不存在则自动创建。适合分块写入大文件。"
-            "\n- 写入后系统自动记录文件认知，后续可用 edit_file 继续编辑。"
-            "\n\n使用场景："
-            "\n- 创建新文件（不要用 bash echo > file，用本工具更可靠）"
-            "\n- 需要完全重写文件内容（如生成配置文件、脚本等）"
-            "\n- 分块写入大文件：先 write 创建，再多次 append 追加"
-            "\n- 如果只需对文件进行局部修改，优先使用 edit_file，避免意外覆盖未修改的部分"
-            "\n\n大文件策略："
-            "\n- 如果文件内容很长（超过 200 行），建议分块写入："
-            "\n  1. 第一次调用 write_file(path, 第一块内容, mode='write')"
-            "\n  2. 后续调用 write_file(path, 下一块内容, mode='append')"
-            "\n  3. 直到所有内容写完"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "要写入的文件内容（当前块）",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["write", "append"],
-                    "description": "写入模式：'write' 覆盖写入（默认），'append' 追加到文件末尾",
-                },
+    "name": "write_file",
+    "description": (
+        "将内容写入文件。支持创建、覆盖和追加三种模式。"
+        "\n\n行为要点："
+        "\n- mode='write'（默认）：完全覆盖文件，如不存在则自动创建（包括父目录）。"
+        "\n- mode='append'：在文件末尾追加内容，如不存在则自动创建。适合分块写入大文件。"
+        "\n- 写入后系统自动记录文件认知，后续可用 edit_file 继续编辑。"
+        "\n\n使用场景："
+        "\n- 创建新文件（不要用 bash echo > file，用本工具更可靠）"
+        "\n- 需要完全重写文件内容（如生成配置文件、脚本等）"
+        "\n- 分块写入大文件：先 write 创建，再多次 append 追加"
+        "\n- 如果只需对文件进行局部修改，优先使用 edit_file，避免意外覆盖未修改的部分"
+        "\n\n大文件策略："
+        "\n- 如果文件内容很长（超过 200 行），建议分块写入："
+        "\n  1. 第一次调用 write_file(path, 第一块内容, mode='write')"
+        "\n  2. 后续调用 write_file(path, 下一块内容, mode='append')"
+        "\n  3. 直到所有内容写完"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "文件路径，支持相对路径（基于工作目录）或绝对路径",
             },
-            "required": ["path", "content"],
+            "content": {
+                "type": "string",
+                "description": "要写入的文件内容（当前块）",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["write", "append"],
+                "description": "写入模式：'write' 覆盖写入（默认），'append' 追加到文件末尾",
+            },
         },
+        "required": ["path", "content"],
     },
 }
 

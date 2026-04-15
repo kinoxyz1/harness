@@ -3,7 +3,7 @@ __all__ = [
     "edit_file",
     "find",
     "read_file",
-    "subagent",
+    "skill",
     "todo",
     "write_file",
 ]

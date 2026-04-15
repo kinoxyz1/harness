@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(slots=True)
+class ContextPatch:
+    allowed_tools: set[str] | None = None
+    model_override: str | None = None
+    effort_override: str | None = None
+
+
+@dataclass(slots=True)
+class ExecutionBarrier:
+    stop_after_tool: bool = True
+    reason: str | None = None
 
 
 def safe_path(path: str, working_dir: str) -> Path:
@@ -19,6 +32,9 @@ class ToolResult:
     success: bool
     error: str | None = None
     truncated: bool = False
+    injected_messages: list[dict[str, Any]] = field(default_factory=list)
+    context_patch: ContextPatch | None = None
+    barrier: ExecutionBarrier | None = None
 
 
 @dataclass
@@ -48,6 +64,8 @@ class ToolUseContext:
         self._files_modified: list[str] = []
         self._messages: list[dict[str, Any]] | None = None
         self._cancelled: bool = False
+        self._session_state: Any = None
+        self._skill_registry: Any = None
 
     @property
     def working_dir(self) -> str:
@@ -118,5 +136,19 @@ class ToolUseContext:
     def cancelled(self) -> bool:
         return self._cancelled
 
+    @property
+    def session_state(self) -> Any:
+        return self._session_state
+
+    @property
+    def skill_registry(self) -> Any:
+        return self._skill_registry
+
     def _cancel(self) -> None:
         self._cancelled = True
+
+    def bind_runtime(self, *, session_state: Any | None = None, skill_registry: Any | None = None) -> None:
+        if session_state is not None:
+            self._session_state = session_state
+        if skill_registry is not None:
+            self._skill_registry = skill_registry

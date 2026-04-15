@@ -33,14 +33,14 @@ class ToolRegistry:
 
     def register(self, module: Any) -> None:
         """从一个工具模块中注册。模块需包含 SCHEMA 和 handle。"""
-        name: str = module.SCHEMA["function"]["name"]
+        name: str = module.SCHEMA["name"]
         self._handlers[name] = module.handle
         self._schemas.append(module.SCHEMA)
         self._readonly[name] = getattr(module, "READONLY", False)
         annotations = getattr(module, "ANNOTATIONS", {})
         if annotations:
             self._annotations[name] = annotations
-        required = module.SCHEMA.get("function", {}).get("parameters", {}).get("required", [])
+        required = module.SCHEMA.get("input_schema", {}).get("required", [])
         self._required_params[name] = required
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -65,7 +65,7 @@ class ToolRegistry:
         """返回只包含允许工具的新注册表。"""
         new_reg = ToolRegistry()
         for schema in self._schemas:
-            name = schema["function"]["name"]
+            name = schema["name"]
             if name in allowed_names:
                 new_reg._handlers[name] = self._handlers[name]
                 new_reg._schemas.append(schema)

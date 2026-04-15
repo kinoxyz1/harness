@@ -10,34 +10,31 @@ from ..context import ToolUseContext, ToolResult
 # ─── Tool 定义（给模型看）───────────────────────────
 
 SCHEMA: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": (
-            f"在终端执行一条 Shell 命令。命令在子进程中执行，不保留环境变量变更。"
-            f"超时设置为 {BASH_TIMEOUT} 秒，长时间运行的命令会被自动终止。"
-            "\n\n安全机制："
-            "\n- 黑名单命令（mkfs, dd）会被直接拒绝。"
-            "\n- 危险命令（rm, sudo, shutdown 等）需要用户确认后才会执行。"
-            "\n\n使用场景："
-            "\n- 运行测试、构建、git 等需要 Shell 环境的操作"
-            "\n- 安装依赖、启动服务等"
-            "\n\n不要用 bash 执行以下操作（有专用工具更安全）："
-            "\n- cat/head/tail 读取文件 → 用 read_file"
-            "\n- find/ls 搜索文件 → 用 find"
-            "\n- sed/awk 修改文件 → 用 edit_file"
-            "\n- echo > 创建文件 → 用 write_file"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "要执行的 Shell 命令",
-                },
+    "name": "bash",
+    "description": (
+        f"在终端执行一条 Shell 命令。命令在子进程中执行，不保留环境变量变更。"
+        f"超时设置为 {BASH_TIMEOUT} 秒，长时间运行的命令会被自动终止。"
+        "\n\n安全机制："
+        "\n- 黑名单命令（mkfs, dd）会被直接拒绝。"
+        "\n- 危险命令（rm, sudo, shutdown 等）需要用户确认后才会执行。"
+        "\n\n使用场景："
+        "\n- 运行测试、构建、git 等需要 Shell 环境的操作"
+        "\n- 安装依赖、启动服务等"
+        "\n\n不要用 bash 执行以下操作（有专用工具更安全）："
+        "\n- cat/head/tail 读取文件 → 用 read_file"
+        "\n- find/ls 搜索文件 → 用 find"
+        "\n- sed/awk 修改文件 → 用 edit_file"
+        "\n- echo > 创建文件 → 用 write_file"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "要执行的 Shell 命令",
             },
-            "required": ["command"],
         },
+        "required": ["command"],
     },
 }
 
