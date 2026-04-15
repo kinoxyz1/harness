@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from typing import Any
 
-from . import ToolResult, ToolUseContext
+from ..context import ToolResult, ToolUseContext
 from .todo import clear_state, restore_snapshot, save_snapshot
 
 if TYPE_CHECKING:
-    from ..subagent_runtime import SubagentRequest
+    from ...session.subagent import SubagentRequest
 
 
 SCHEMA: dict[str, Any] = {
@@ -61,14 +61,14 @@ _RUNTIME_CLS = None
 
 
 def _default_runtime_cls():
-    from ..subagent_runtime import SubagentRuntime
+    from ...session.subagent import SubagentRuntime
 
     return SubagentRuntime
 
 
 def parse_subagent_request(args: dict[str, Any]) -> "SubagentRequest":
     """解析并校验 subagent tool 参数。"""
-    from ..subagent_runtime import SubagentRequest, SubagentType
+    from ...session.subagent import SubagentRequest, SubagentType
 
     task = args["task"]
     if not isinstance(task, str) or not task.strip():
@@ -118,7 +118,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         clear_state()
         runtime_cls = _RUNTIME_CLS or _default_runtime_cls()
         runtime = runtime_cls(parent_context=context)
-        from ..subagent_runtime import render_subagent_summary
+        from ...session.subagent import render_subagent_summary
         result = runtime.run(request)
         return ToolResult(
             output=render_subagent_summary(result),

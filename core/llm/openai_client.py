@@ -15,10 +15,10 @@ from typing import Any
 
 from rich.console import Console
 
-from .config import ENABLE_THINKING, MAX_TOKENS, MODEL
-from .llm import create_llm_client
+from ..shared.config import ENABLE_THINKING, MAX_TOKENS, MODEL
+from .factory import create_llm_client
 from .protocol import normalize_messages
-from .run_options import RunDisplayOptions
+from ..shared.run_options import RunDisplayOptions
 
 _console = Console()
 

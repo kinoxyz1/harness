@@ -5,12 +5,18 @@ from enum import Enum
 import os
 from typing import Any, Callable
 
-from .agent import AgentLoop, AgentRunResult
-from .context import ContextPipeline, get_system_context, get_user_context
-from .llm_client import OpenAIClient
-from .renderer import QuietRenderer
-from .run_options import RunDisplayOptions
-from .tools import ToolUseContext, registry
+from ..prompt.system_context import get_system_context, get_user_context
+from ..llm.client import ModelGateway
+from ..llm.openai_client import OpenAIClient
+from ..policy.base import PolicyRunner
+from ..policy.max_turns import MaxTurnsPolicy
+from ..query.recovery import RecoveryManager
+from ..ui.renderer import QuietRenderer
+from ..shared.run_options import RunDisplayOptions
+from .engine import SessionEngine
+from .view_builder import MessageViewBuilder
+from ..tools import ToolUseContext, registry
+from ..tools.runtime import ToolExecutorRuntime
 
 
 class SubagentType(str, Enum):
@@ -123,50 +129,18 @@ def get_subagent_definition(agent_type: SubagentType) -> SubagentDefinition:
         raise ValueError(f"Unsupported subagent type: {agent_type}") from e
 
 
-def build_subagent_tools(
-    definition: SubagentDefinition,
-    tools_schema: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    """根据子代理定义过滤工具 schema。"""
-    source = tools_schema or registry.schemas()
-
+def _compute_allowed_names(definition: SubagentDefinition) -> set[str]:
+    """根据子代理定义计算允许的工具名集合。"""
     if definition.allowed_tools is None:
-        allowed_names = {
-            schema["function"]["name"]
-            for schema in source
-        }
+        allowed_names = {schema["function"]["name"] for schema in registry.schemas()}
     else:
         allowed_names = set(definition.allowed_tools)
-
     allowed_names -= set(definition.disallowed_tools)
-
-    return [
-        schema for schema in source
-        if schema["function"]["name"] in allowed_names
-    ]
-
-
-def build_subagent_messages(
-    request: SubagentRequest,
-    definition: SubagentDefinition,
-    *,
-    working_dir: str,
-) -> list[dict[str, Any]]:
-    """构造 fresh 模式下的子代理消息。"""
-    project_root = working_dir if definition.include_project_context else None
-    system_prompt = get_system_context(project_root=project_root)
-    if definition.system_prompt_suffix.strip():
-        system_prompt = f"{system_prompt}\n\n{definition.system_prompt_suffix.strip()}"
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": get_user_context(working_dir)},
-        {"role": "user", "content": request.task},
-    ]
+    return allowed_names
 
 
 def coerce_stop_reason(value: str) -> SubagentStopReason:
-    """将 AgentLoop 的 stop reason 规范化为子代理 stop reason。"""
+    """将 QueryLoop 的 stop reason 规范化为子代理 stop reason。"""
     try:
         return SubagentStopReason(value)
     except ValueError:
@@ -198,14 +172,10 @@ class SubagentRuntime:
         *,
         parent_context: ToolUseContext | None = None,
         llm_factory: Callable[[], Any] | None = None,
-        renderer_factory: Callable[[], Any] | None = None,
-        agent_loop_cls: type[AgentLoop] = AgentLoop,
         tools_registry=registry,
     ) -> None:
         self._parent_context = parent_context
         self._llm_factory = llm_factory or OpenAIClient
-        self._renderer_factory = renderer_factory or QuietRenderer
-        self._agent_loop_cls = agent_loop_cls
         self._tools_registry = tools_registry
 
     def run(self, request: SubagentRequest) -> SubagentRunResult:
@@ -215,25 +185,40 @@ class SubagentRuntime:
             raise ValueError(f"Unsupported context mode in V1 runtime: {definition.context_mode.value}")
 
         working_dir = self._parent_context.working_dir if self._parent_context else os.getcwd()
-        sub_messages = build_subagent_messages(
-            request,
-            definition,
-            working_dir=working_dir,
-        )
-        sub_tools = build_subagent_tools(definition, self._tools_registry.schemas())
-        sub_context = ToolUseContext(
-            working_dir=working_dir,
-            max_turns=request.max_turns or definition.default_max_turns,
+        max_turns = request.max_turns or definition.default_max_turns
+
+        # 构建系统提示
+        project_root = working_dir if definition.include_project_context else None
+        system_prompt = get_system_context(project_root=project_root)
+        if definition.system_prompt_suffix.strip():
+            system_prompt = f"{system_prompt}\n\n{definition.system_prompt_suffix.strip()}"
+
+        env_context = get_user_context(working_dir)
+
+        # 构建过滤后的注册表和 schema
+        allowed_names = _compute_allowed_names(definition)
+        sub_registry = self._tools_registry.filtered(allowed_names)
+        sub_schemas = sub_registry.schemas()
+
+        # 创建工具上下文
+        tool_context = ToolUseContext(working_dir=working_dir, max_turns=max_turns)
+
+        # 创建 session engine
+        engine = SessionEngine(
+            model_gateway=ModelGateway(self._llm_factory()),
+            tool_runtime=ToolExecutorRuntime(sub_registry, tool_context, display=RunDisplayOptions(quiet=True)),
+            tool_context=tool_context,
+            policy_runner=PolicyRunner([MaxTurnsPolicy(max_turns)]),
+            recovery=RecoveryManager(),
+            view_builder=MessageViewBuilder(tools=sub_schemas),
         )
 
-        loop = self._agent_loop_cls(
-            llm=self._llm_factory(),
-            renderer=self._renderer_factory(),
-            context=ContextPipeline(),
-            tools_schema=sub_tools,
-            display=RunDisplayOptions(quiet=True),
-        )
-        result: AgentRunResult = loop.run(sub_messages, tool_context=sub_context)
+        # 预填充系统提示和环境上下文
+        engine.append_message({"role": "system", "content": system_prompt})
+        engine.append_message({"role": "user", "content": env_context})
+
+        # 执行任务
+        result = engine.submit_user_message(request.task)
 
         return SubagentRunResult(
             request=request,

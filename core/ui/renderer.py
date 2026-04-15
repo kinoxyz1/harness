@@ -6,8 +6,8 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 
-from .interfaces import Renderer
-from .config import SHOW_THINKING
+from .shared.interfaces import Renderer
+from .shared.config import SHOW_THINKING
 
 
 class RichRenderer:

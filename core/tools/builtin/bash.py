@@ -4,8 +4,8 @@ import shlex
 import subprocess
 from typing import Any
 
-from ..config import BASH_TIMEOUT
-from . import ToolUseContext, ToolResult
+from ...shared.config import BASH_TIMEOUT
+from ..context import ToolUseContext, ToolResult
 
 # ─── Tool 定义（给模型看）───────────────────────────
 

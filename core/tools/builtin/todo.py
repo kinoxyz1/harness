@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import ToolResult, ToolUseContext
+from ..context import ToolResult, ToolUseContext
 
 
 # ─── Tool 定义（给模型看）───────────────────────────

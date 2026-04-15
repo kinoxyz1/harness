@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import ToolUseContext, ToolResult
+from ..context import ToolUseContext, ToolResult
 
 # ─── Tool 定义（给模型看）───────────────────────────
 

@@ -12,19 +12,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
-from .tools import ToolResult, ToolUseContext
-from .config import MAX_OUTPUT_CHARS
-from .run_options import RunDisplayOptions
+from .context import ToolResult, ToolUseContext
+from ..shared.config import MAX_OUTPUT_CHARS
+from ..shared.run_options import RunDisplayOptions
 
 
 @dataclass
 class ToolCall:
     """对 API 返回的 tool_call 的内部表示。"""
 
-    idx: int                    # 在原始列表中的位置（保证回写顺序）
-    name: str                   # 工具名
-    call_id: str                # API 的 tool_call.id
-    args: dict[str, Any]        # 解析后的参数
+    idx: int
+    name: str
+    call_id: str
+    args: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ToolBatchResult:
+    tool_results: list[dict[str, Any]]
+    files_modified: list[str]
+    tool_names: list[str]
 
 
 @dataclass
@@ -32,7 +39,7 @@ class _Batch:
     """一批可一起执行的 tool call（内部使用）。"""
 
     calls: list[ToolCall]
-    parallel: bool              # True = 可并行，False = 独占串行
+    parallel: bool
 
 
 class ToolExecutorRuntime:
@@ -48,10 +55,10 @@ class ToolExecutorRuntime:
         self._context = context
         self._display = display or RunDisplayOptions()
 
-    def execute_batch(self, tool_calls: list[ToolCall]) -> list[ToolResult]:
+    def execute_batch(self, tool_calls: list[ToolCall]) -> ToolBatchResult:
         """接收一批 tool_call，分批执行，返回有序结果。"""
         if not tool_calls:
-            return []
+            return ToolBatchResult(tool_results=[], files_modified=[], tool_names=[])
 
         batches = self._partition(tool_calls)
         all_results: dict[int, ToolResult] = {}
@@ -75,11 +82,23 @@ class ToolExecutorRuntime:
         if not self._display.quiet:
             sys.stdout.write(f"\033[36m[Runtime] 全部完成，耗时 {elapsed:.2f}s\033[0m\n")
 
-        # 按原始顺序返回
-        return [all_results[i] for i in range(len(tool_calls))]
+        ordered_calls = tool_calls
+        ordered_results = [all_results[i] for i in range(len(tool_calls))]
+        tool_messages = [
+            {
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "content": result.output,
+            }
+            for call, result in zip(ordered_calls, ordered_results)
+        ]
+        return ToolBatchResult(
+            tool_results=tool_messages,
+            files_modified=self._context.files_modified,
+            tool_names=[call.name for call in ordered_calls],
+        )
 
     def _partition(self, calls: list[ToolCall]) -> list[_Batch]:
-        """按 READONLY 分批：连续只读 → 并行 batch，写 → 独占 batch。"""
         batches: list[_Batch] = []
         current_parallel: list[ToolCall] = []
 
@@ -98,7 +117,6 @@ class ToolExecutorRuntime:
         return batches
 
     def _execute_parallel(self, batch: _Batch) -> dict[int, ToolResult]:
-        """并行执行只读工具，结果按 idx 排序。"""
         results: dict[int, ToolResult] = {}
         if not self._display.quiet:
             sys.stdout.write(f"\033[36m[Runtime] ▶ 并行执行 {len(batch.calls)} 个只读工具：{[c.name for c in batch.calls]}\033[0m\n")
@@ -122,7 +140,6 @@ class ToolExecutorRuntime:
         return results
 
     def _execute_serial(self, batch: _Batch) -> dict[int, ToolResult]:
-        """串行执行写工具（独占）。"""
         results: dict[int, ToolResult] = {}
         for call in batch.calls:
             if not self._display.quiet:
@@ -131,20 +148,17 @@ class ToolExecutorRuntime:
         return results
 
     def _run_single(self, call: ToolCall) -> ToolResult:
-        """执行单个工具调用（注入身份 + 异常保护 + 进度显示）。"""
         self._context._set_call_identity(
             name=call.name, call_id=call.call_id, turn=self._context.turn_count
         )
         start = time.time()
 
-        # 在后台线程执行工具，主线程显示进度
         result_holder: list[ToolResult] = []
         error_holder: list[Exception] = []
 
         def run():
             try:
                 result = self._registry.execute(call.name, call.args, self._context)
-                # Truncate oversized output
                 if len(result.output) > MAX_OUTPUT_CHARS:
                     truncated_output = result.output[:MAX_OUTPUT_CHARS]
                     result = ToolResult(
@@ -160,7 +174,6 @@ class ToolExecutorRuntime:
         thread = threading.Thread(target=run)
         thread.start()
 
-        # 主线程：等待执行，超过 2 秒显示进度
         shown_progress = False
         while thread.is_alive():
             thread.join(timeout=1.0)

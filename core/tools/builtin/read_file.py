@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import FileState, ToolUseContext, ToolResult, safe_path
+from ..context import FileState, ToolUseContext, ToolResult, safe_path
 
 # ─── Tool 定义（给模型看）───────────────────────────
 

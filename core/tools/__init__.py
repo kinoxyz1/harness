@@ -1,172 +1,24 @@
 from __future__ import annotations
 
 import importlib
-import os
 import pathlib
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
-
-def safe_path(p: str, working_dir: str) -> Path:
-    """解析路径并确保不逃逸工作目录。
-
-    将相对路径基于 working_dir 解析为绝对路径，
-    然后检查最终路径是否仍在工作目录内。
-    """
-    base = Path(working_dir).resolve()
-    path = (base / p).resolve()
-    # if not path.is_relative_to(base):
-    #     raise ValueError(f"Path escapes workspace: {p}")
-    return path
+from .context import FileState, ToolResult, ToolUseContext, safe_path
+from .runtime import ToolCall, ToolExecutorRuntime
 
 
-@dataclass
-class ToolResult:
-    """工具执行的统一返回格式。"""
-
-    output: str
-    success: bool
-    error: str | None = None
-    truncated: bool = False
-
-
-@dataclass
-class FileState:
-    """工具对单个文件的认知状态。参考 Claude Code 的 readFileState。"""
-
-    content: str                        # 文件内容
-    timestamp: float                    # os.path.getmtime() 读取时的修改时间
-    offset: int | None = None           # 读取偏移（None = 全文）
-    limit: int | None = None            # 读取行数限制（None = 全文）
-
-    @property
-    def is_full_read(self) -> bool:
-        """是否为完整读取（不是局部读取）。"""
-        return self.offset is None and self.limit is None
-
-
-class ToolUseContext:
-    """工具执行上下文。
-
-    五层设计，每层有独立的访问规则：
-    - 环境层：构造时设置，工具只读
-    - 身份层：每次 tool call 更新，工具只读
-    - 文件认知层：工具可读写，框架控制一致性
-    - 对话层：只读引用
-    - 控制层：外部信号，工具只能查询
-    """
-
-    def __init__(self, *, working_dir: str, max_turns: int):
-        # ── 环境层 ──
-        self._working_dir = working_dir
-        self._max_turns = max_turns
-
-        # ── 身份层 ──
-        self._tool_name: str = ""
-        self._tool_call_id: str = ""
-        self._turn_count: int = 0
-
-        # ── 文件认知层 ──
-        self._file_state: dict[str, FileState] = {}
-        self._files_modified: list[str] = []
-
-        # ── 对话层 ──
-        self._messages: list[dict[str, Any]] | None = None
-
-        # ── 控制层 ──
-        self._cancelled: bool = False
-
-    # ── 环境层 ──
-
-    @property
-    def working_dir(self) -> str:
-        return self._working_dir
-
-    @property
-    def max_turns(self) -> int:
-        return self._max_turns
-
-    # ── 身份层 ──
-
-    @property
-    def tool_name(self) -> str:
-        return self._tool_name
-
-    @property
-    def tool_call_id(self) -> str:
-        return self._tool_call_id
-
-    @property
-    def turn_count(self) -> int:
-        return self._turn_count
-
-    def _set_call_identity(self, *, name: str, call_id: str, turn: int) -> None:
-        """Agent loop 在每次 tool call 前调用。"""
-        self._tool_name = name
-        self._tool_call_id = call_id
-        self._turn_count = turn
-
-    # ── 文件认知层 ──
-
-    def get_file_state(self, path: str) -> FileState | None:
-        """查询工具对某个文件的认知。返回 None 表示未认知。"""
-        state = self._file_state.get(path)
-        if state is None:
-            return None
-        try:
-            if os.path.getmtime(path) != state.timestamp:
-                del self._file_state[path]
-                return None
-        except OSError:
-            del self._file_state[path]
-            return None
-        return state
-
-    def set_file_state(self, path: str, state: FileState) -> None:
-        """记录对文件的认知（read_file 成功后调用）。"""
-        self._file_state[path] = state
-
-    def update_file_state(self, path: str, content: str) -> None:
-        """写工具修改文件后更新认知（edit_file / write_file 成功后调用）。"""
-        self._file_state[path] = FileState(
-            content=content,
-            timestamp=os.path.getmtime(path),
-        )
-
-    def invalidate_file_state(self, path: str) -> None:
-        """使对某个文件的认知失效。"""
-        self._file_state.pop(path, None)
-
-    @property
-    def files_modified(self) -> list[str]:
-        """返回受管写工具记录的修改文件列表。"""
-        return list(self._files_modified)
-
-    def mark_file_modified(self, path: str) -> None:
-        """记录某个文件已被受管写工具修改。"""
-        if path not in self._files_modified:
-            self._files_modified.append(path)
-
-    # ── 对话层 ──
-
-    def set_messages(self, messages: list[dict[str, Any]]) -> None:
-        """Agent loop 构造时调用，传入只读引用。"""
-        self._messages = messages
-
-    @property
-    def messages(self) -> list[dict[str, Any]] | None:
-        return self._messages
-
-    # ── 控制层 ──
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancelled
-
-    def _cancel(self) -> None:
-        """外部调用，请求取消。"""
-        self._cancelled = True
+__all__ = [
+    "FileState",
+    "ToolCall",
+    "ToolExecutorRuntime",
+    "ToolResult",
+    "ToolRegistry",
+    "ToolUseContext",
+    "auto_discover",
+    "registry",
+    "safe_path",
+]
 
 
 class ToolRegistry:
@@ -185,11 +37,9 @@ class ToolRegistry:
         self._handlers[name] = module.handle
         self._schemas.append(module.SCHEMA)
         self._readonly[name] = getattr(module, "READONLY", False)
-        # 收集 ANNOTATIONS
         annotations = getattr(module, "ANNOTATIONS", {})
         if annotations:
             self._annotations[name] = annotations
-        # 提取必填参数列表
         required = module.SCHEMA.get("function", {}).get("parameters", {}).get("required", [])
         self._required_params[name] = required
 
@@ -211,13 +61,27 @@ class ToolRegistry:
         """查询工具的完整 ANNOTATIONS。"""
         return dict(self._annotations.get(name, {}))
 
+    def filtered(self, allowed_names: set[str]) -> ToolRegistry:
+        """返回只包含允许工具的新注册表。"""
+        new_reg = ToolRegistry()
+        for schema in self._schemas:
+            name = schema["function"]["name"]
+            if name in allowed_names:
+                new_reg._handlers[name] = self._handlers[name]
+                new_reg._schemas.append(schema)
+                new_reg._readonly[name] = self._readonly.get(name, False)
+                if name in self._annotations:
+                    new_reg._annotations[name] = self._annotations[name]
+                if name in self._required_params:
+                    new_reg._required_params[name] = self._required_params[name]
+        return new_reg
+
     def execute(self, name: str, args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         """查表 → 验证参数 → 执行 → 返回 ToolResult。"""
         handler = self._handlers.get(name)
         if not handler:
             return ToolResult(output=f"Unknown tool '{name}'", success=False, error="not_found")
 
-        # 验证必填参数
         required = self._required_params.get(name, [])
         missing = [p for p in required if p not in args]
         if missing:
@@ -231,13 +95,13 @@ class ToolRegistry:
 
 
 def auto_discover() -> ToolRegistry:
-    """扫描 core/tools/ 目录，自动注册所有工具模块。"""
+    """扫描 core/tools/builtin/ 目录，自动注册所有工具模块。"""
     reg = ToolRegistry()
-    tools_dir = pathlib.Path(__file__).parent
+    tools_dir = pathlib.Path(__file__).parent / "builtin"
     for file in tools_dir.glob("*.py"):
         if file.name.startswith("_"):
             continue
-        module = importlib.import_module(f"core.tools.{file.stem}")
+        module = importlib.import_module(f"core.tools.builtin.{file.stem}")
         reg.register(module)
     return reg
 
