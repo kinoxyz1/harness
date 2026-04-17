@@ -2,18 +2,36 @@
 from __future__ import annotations
 
 from itertools import islice
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 from ..shared.interfaces import Renderer
 from ..shared.config import SHOW_THINKING
 
 
-def _summarize_tool_args(name: str, args: dict[str, Any]) -> str:
-    if name == "bash" and args.get("command"):
-        return str(args["command"])
+def _tool_call_label(name: str, args: dict[str, Any]) -> str:
+    if name == "skill":
+        return f"Skill({args.get('skill', '')})"
+    if name == "read_file":
+        path = str(args.get("path", ""))
+        return f"Read({Path(path).name})"
+    if name == "bash":
+        if args.get("description"):
+            return f"Bash({args['description']})"
+        if args.get("command"):
+            return f"Bash({args['command']})"
+    if name == "find" and args.get("pattern"):
+        return f"Find({args['pattern']})"
+    if name == "write_file":
+        path = str(args.get("path", ""))
+        return f"Write({Path(path).name})"
+    if name == "edit_file":
+        path = str(args.get("path", ""))
+        return f"Edit({Path(path).name})"
 
     preferred_keys = ("path", "pattern", "query", "task", "offset", "limit")
     parts = [f"{key}={args[key]!r}" for key in preferred_keys if key in args]
@@ -36,6 +54,50 @@ def _preview_output(output: str, *, max_lines: int = 10, max_chars: int = 1200) 
     if truncated:
         preview += "\n... (已省略后续输出)"
     return preview
+
+
+def _line_count_preview(output: str) -> int | None:
+    count = 0
+    for line in output.splitlines():
+        if "\t" not in line:
+            if count > 0:
+                break
+            continue
+        line_no, _ = line.split("\t", 1)
+        if line_no.strip().isdigit():
+            count += 1
+        elif count > 0:
+            break
+    return count or None
+
+
+def _tool_result_summary(name: str, output: str) -> str | None:
+    # NOTE: 在 runtime 提供结构化结果元数据前，这里有意基于当前工具输出文案做模式匹配；
+    # 任何不匹配都返回 None，由调用方走通用 preview 回退，避免绑定更深接口耦合。
+    if name == "skill" and output.startswith("Skill loaded:"):
+        return "已加载 skill，等待重新规划"
+
+    if name == "read_file":
+        line_count = _line_count_preview(output)
+        if line_count is not None:
+            return f"已读取文件内容，预览 {line_count} 行"
+
+    if name == "find":
+        stripped = output.strip()
+        if not stripped:
+            return None
+        if stripped.startswith("未找到匹配"):
+            return None
+        if stripped.startswith("目录不存在:"):
+            return None
+        lines = [
+            line for line in output.splitlines()
+            if line.strip() and not line.startswith("(结果过多")
+        ]
+        if lines:
+            return f"已找到 {len(lines)} 个匹配文件"
+
+    return None
 
 
 class RichRenderer:
@@ -98,21 +160,24 @@ class RichRenderer:
 
     def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
         """显示任务完成总结面板。"""
+        body = f"[bold green]所有任务已完成[/bold green]\n\n完成: {completed}/{total} 个任务"
+        if elapsed > 0:
+            body += f"\n耗时: {elapsed:.1f}s"
         self._console.print(Panel(
-            f"[bold green]所有任务已完成[/bold green]\n\n"
-            f"完成: {completed}/{total} 个任务\n"
-            f"耗时: {elapsed:.1f}s",
+            body,
             title="任务总结",
             border_style="green",
         ))
 
     def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
         """显示工具调用开始。"""
-        self._console.print(f"\n[yellow]$ {_summarize_tool_args(name, args)}[/yellow]")
+        label = escape(_tool_call_label(name, args))
+        self._console.print(f"\n[yellow]$ {label}[/yellow]")
 
     def show_tool_result(self, name: str, output: str) -> None:
         """显示工具执行结果。"""
-        self._console.print(_preview_output(output))
+        summary = _tool_result_summary(name, output)
+        self._console.print(summary if summary is not None else _preview_output(output), markup=False)
 
     def show_error(self, message: str) -> None:
         """显示错误信息。"""

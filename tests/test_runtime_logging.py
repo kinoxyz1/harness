@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from core.session.state import SessionState, TodoItem, TodoState
-from core.tools.builtin import todo as todo_mod
+from core.session.state import SessionState, TodoItem
+from core.shared.run_options import RunDisplayOptions
+from core.tools import runtime as runtime_mod
 from core.tools.context import ToolResult, ToolUseContext
 from core.tools.runtime import ToolCall, ToolExecutorRuntime
 from core.ui.renderer import RichRenderer
@@ -28,25 +29,27 @@ class FakeRegistryReturningTodoSuccess:
         return ToolResult(output="Todo plan updated successfully.", success=True)
 
 
+class FakeWriteRegistry:
+    def is_readonly(self, name: str) -> bool:
+        return False
+
+    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolResult:
+        return ToolResult(output="write ok", success=True)
+
+
 class FakeRenderer:
     def __init__(self) -> None:
         self.tool_calls: list[tuple[str, dict]] = []
         self.tool_results: list[tuple[str, str]] = []
-        self.progress_calls: list[list[TodoItem]] = []
-        self.completion_calls: list[tuple[int, int]] = []
-
+        self.status_calls: list[str] = []
     def show_tool_call(self, name: str, args: dict) -> None:
         self.tool_calls.append((name, args))
 
     def show_tool_result(self, name: str, output: str) -> None:
         self.tool_results.append((name, output))
 
-    def show_progress(self, items: list[TodoItem]) -> None:
-        self.progress_calls.append(items)
-
-    def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
-        self.completion_calls.append((completed, total))
-
+    def show_status(self, message: str) -> None:
+        self.status_calls.append(message)
 
 def test_runtime_emits_tool_call_and_result_to_renderer() -> None:
     renderer = FakeRenderer()
@@ -66,69 +69,116 @@ def test_runtime_emits_tool_call_and_result_to_renderer() -> None:
     assert "1\tline 1" in renderer.tool_results[0][1]
 
 
-def test_runtime_renders_active_form_after_todo_write(tmp_path) -> None:
+def test_runtime_compact_mode_hides_internal_trace(capsys) -> None:
+    renderer = FakeRenderer()
+    runtime = ToolExecutorRuntime(
+        FakeRegistry(),
+        ToolUseContext(working_dir=".", max_turns=5),
+        display=RunDisplayOptions(),
+        renderer=renderer,
+    )
+
+    runtime.execute_batch([
+        ToolCall(idx=0, name="read_file", call_id="call_1", args={"path": "README.md"})
+    ])
+
+    captured = capsys.readouterr()
+
+    assert "[Runtime]" not in captured.out
+    assert renderer.tool_calls == [("read_file", {"path": "README.md"})]
+
+
+def test_runtime_debug_mode_keeps_internal_trace(capsys) -> None:
+    renderer = FakeRenderer()
+    runtime = ToolExecutorRuntime(
+        FakeRegistry(),
+        ToolUseContext(working_dir=".", max_turns=5),
+        display=RunDisplayOptions(runtime_trace="debug"),
+        renderer=renderer,
+    )
+
+    runtime.execute_batch([
+        ToolCall(idx=0, name="read_file", call_id="call_1", args={"path": "README.md"})
+    ])
+
+    captured = capsys.readouterr()
+
+    assert "[Runtime] 收到 1 个 tool_call" in captured.out
+
+
+def test_runtime_compact_mode_reports_long_running_status_once(monkeypatch) -> None:
+    class FakeThread:
+        def __init__(self, *, target) -> None:
+            self._target = target
+            self._polls = 0
+
+        def start(self) -> None:
+            self._target()
+
+        def join(self, timeout=None) -> None:
+            self._polls += 1
+
+        def is_alive(self) -> bool:
+            return self._polls < 3
+
+    time_values = [100.0, 100.0, 101.0, 102.0, 102.0, 102.5, 102.5]
+    time_index = {"value": 0}
+
+    def fake_time() -> float:
+        idx = time_index["value"]
+        time_index["value"] += 1
+        return time_values[min(idx, len(time_values) - 1)]
+
+    monkeypatch.setattr(runtime_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(runtime_mod.time, "time", fake_time)
+
+    renderer = FakeRenderer()
+    runtime = ToolExecutorRuntime(
+        FakeWriteRegistry(),
+        ToolUseContext(working_dir=".", max_turns=5),
+        display=RunDisplayOptions(),
+        renderer=renderer,
+    )
+
+    runtime.execute_batch([
+        ToolCall(idx=0, name="bash", call_id="call_1", args={"command": "echo ok"})
+    ])
+
+    assert renderer.status_calls == ["bash 执行中... 2s"]
+
+
+def test_runtime_compact_mode_skips_generic_todo_events_after_query_loop_migration(tmp_path) -> None:
     renderer = FakeRenderer()
     context = ToolUseContext(working_dir=str(tmp_path), max_turns=20)
-    todo_mod._latest_todo_state = TodoState(  # type: ignore[attr-defined]
-        items=[
-            TodoItem(
-                content="Legacy global item",
-                active_form="Legacy global item",
-                status="in_progress",
-            )
-        ]
+    context.bind_runtime(session_state=SessionState(conversation_messages=[]))
+    runtime = ToolExecutorRuntime(
+        FakeRegistryReturningTodoSuccess(),
+        context,
+        display=RunDisplayOptions(),
+        renderer=renderer,
     )
-    context.bind_runtime(session_state=SessionState(
-        conversation_messages=[],
-        todo_state=TodoState(
-            items=[
-                TodoItem(
-                    content="Cross-check findings",
-                    active_form="Cross-checking findings",
-                    status="in_progress",
-                    workflow_ref="2.5",
-                )
-            ]
-        ),
-    ))
-    runtime = ToolExecutorRuntime(FakeRegistryReturningTodoSuccess(), context, renderer=renderer)
 
     runtime.execute_batch([ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
 
-    assert renderer.progress_calls[0][0].active_form == "Cross-checking findings"
+    assert renderer.tool_calls == []
+    assert renderer.tool_results == []
 
 
-def test_renderer_shows_completion_summary_when_active_plan_clears(tmp_path) -> None:
+def test_runtime_debug_mode_keeps_generic_todo_events_after_query_loop_migration(tmp_path) -> None:
     renderer = FakeRenderer()
     context = ToolUseContext(working_dir=str(tmp_path), max_turns=20)
-    todo_mod._latest_todo_state = TodoState(  # type: ignore[attr-defined]
-        items=[
-            TodoItem(
-                content="Legacy global item",
-                active_form="Legacy global item",
-                status="in_progress",
-            )
-        ]
+    context.bind_runtime(session_state=SessionState(conversation_messages=[]))
+    runtime = ToolExecutorRuntime(
+        FakeRegistryReturningTodoSuccess(),
+        context,
+        display=RunDisplayOptions(runtime_trace="debug"),
+        renderer=renderer,
     )
-    context.bind_runtime(session_state=SessionState(
-        conversation_messages=[],
-        todo_state=TodoState(
-            items=[],
-            last_completed_items=[
-                TodoItem(
-                    content="Verify report completeness",
-                    active_form="Verifying report completeness",
-                    status="completed",
-                    workflow_ref="4",
-                )
-            ],
-        ),
-    ))
-    runtime = ToolExecutorRuntime(FakeRegistryReturningTodoSuccess(), context, renderer=renderer)
 
     runtime.execute_batch([ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
 
-    assert renderer.completion_calls == [(1, 1)]
+    assert renderer.tool_calls == [("todo", {"items": []})]
+    assert renderer.tool_results == [("todo", "Todo plan updated successfully.")]
 
 
 def test_renderer_prefers_active_form_for_in_progress_items() -> None:
@@ -148,3 +198,84 @@ def test_renderer_prefers_active_form_for_in_progress_items() -> None:
 
     assert "Cross-checking findings" in output
     assert "Cross-check findings" not in output
+
+
+def test_renderer_formats_human_friendly_tool_labels() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_call("skill", {"skill": "analysis-report"})
+    renderer.show_tool_call("read_file", {"path": "/tmp/data/TEST_DATA.csv"})
+    renderer.show_tool_call("bash", {"description": "分析 CSV 结构", "command": "python inspect.py"})
+    renderer.show_tool_call("find", {"pattern": "**/*.py"})
+
+    output = console.export_text()
+
+    assert "Skill(analysis-report)" in output
+    assert "Read(TEST_DATA.csv)" in output
+    assert "Bash(分析 CSV 结构)" in output
+    assert "Find(**/*.py)" in output
+
+
+def test_renderer_summarizes_skill_and_read_results_compactly() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_result(
+        "skill",
+        "Skill loaded: analysis-report. Re-evaluate your next action using the injected skill guidance.",
+    )
+    renderer.show_tool_result("read_file", "1\talpha\n2\tbeta\n3\tgamma")
+    renderer.show_tool_result("find", "core/ui/renderer.py\ntests/test_runtime_logging.py")
+
+    output = console.export_text()
+
+    assert "已加载 skill，等待重新规划" in output
+    assert "已读取文件内容，预览 3 行" in output
+    assert "已找到 2 个匹配文件" in output
+
+
+def test_renderer_renders_bracket_labels_and_results_literally() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_call("find", {"pattern": "[ab]*.py"})
+    renderer.show_tool_call("bash", {"description": "[red]oops"})
+    renderer.show_tool_result("bash", "[red]oops[/red]\nFind([ab]*.py)")
+
+    output = console.export_text()
+
+    assert "Find([ab]*.py)" in output
+    assert "Bash([red]oops)" in output
+    assert "[red]oops[/red]" in output
+    assert "Find([ab]*.py)" in output
+
+
+def test_renderer_result_summary_falls_back_to_preview_for_non_matching_output() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_result("skill", "Skill loading: analysis-report")
+    renderer.show_tool_result("read_file", "alpha\nbeta")
+    renderer.show_tool_result("find", "未找到匹配 '**/*.py' 的文件")
+
+    output = console.export_text()
+
+    assert "Skill loading: analysis-report" in output
+    assert "alpha" in output
+    assert "beta" in output
+    assert "未找到匹配 '**/*.py' 的文件" in output
+    assert "已加载 skill，等待重新规划" not in output
+    assert "已读取文件内容，预览" not in output
+
+
+def test_renderer_hides_unknown_completion_elapsed() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_completion_summary(completed=2, total=2, elapsed=0.0)
+
+    output = console.export_text()
+
+    assert "完成: 2/2 个任务" in output
+    assert "耗时:" not in output

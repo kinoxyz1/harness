@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from ..context import ExecutionBarrier, ToolResult, ToolUseContext
@@ -68,13 +67,6 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         )
     except ValueError as exc:
         return ToolResult(output=str(exc), success=False, error="budget_exceeded")
-
-    ref_count = len(content.reference_bodies)
-    ref_chars = sum(len(v) for v in content.reference_bodies.values())
-    sys.stdout.write(
-        f"\033[36m[Skill] 内联加载 {skill_id}"
-        f" ({ref_count} refs, {ref_chars:,} chars 内联)\033[0m\n"
-    )
 
     return ToolResult(
         output=f"Skill loaded: {skill_id}. Re-evaluate your next action using the injected skill guidance.",

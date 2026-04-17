@@ -61,6 +61,14 @@ class ToolExecutorRuntime:
         self._display = display or RunDisplayOptions()
         self._renderer = renderer
 
+    def _trace_enabled(self) -> bool:
+        return (not self._display.quiet) and self._display.runtime_trace == "debug"
+
+    def _should_render_generic_tool_event(self, tool_name: str) -> bool:
+        if tool_name != "todo":
+            return True
+        return self._display.runtime_trace == "debug"
+
     def execute_batch(self, tool_calls: list[ToolCall]) -> ToolBatchResult:
         """接收一批 tool_call，分批执行，返回有序结果。"""
         if not tool_calls:
@@ -76,7 +84,7 @@ class ToolExecutorRuntime:
         batches = self._partition(tool_calls)
         all_results: dict[int, ToolResult] = {}
 
-        if not self._display.quiet:
+        if self._trace_enabled():
             sys.stdout.write(f"\033[36m[Runtime] 收到 {len(tool_calls)} 个 tool_call，分为 {len(batches)} 批：\033[0m\n")
             for i, b in enumerate(batches):
                 mode = "并行" if b.parallel else "串行"
@@ -92,13 +100,15 @@ class ToolExecutorRuntime:
             all_results.update(batch_results)
 
         elapsed = time.time() - batch_start
-        if not self._display.quiet:
+        if self._trace_enabled():
             sys.stdout.write(f"\033[36m[Runtime] 全部完成，耗时 {elapsed:.2f}s\033[0m\n")
 
         ordered_calls = tool_calls
         ordered_results = [all_results[i] for i in range(len(tool_calls))]
         if self._renderer is not None and not self._display.quiet:
             for call, result in zip(ordered_calls, ordered_results):
+                if not self._should_render_generic_tool_event(call.name):
+                    continue
                 self._renderer.show_tool_call(call.name, call.args)
                 self._renderer.show_tool_result(call.name, result.output)
         tool_messages = [
@@ -141,7 +151,7 @@ class ToolExecutorRuntime:
         context_patches: list[ContextPatch] = []
         barrier: ExecutionBarrier | None = None
 
-        if not self._display.quiet:
+        if self._trace_enabled():
             sys.stdout.write(f"\033[36m[Runtime] 收到 {len(tool_calls)} 个 tool_call（含 skill，顺序执行）\033[0m\n")
 
         for pos, call in enumerate(tool_calls):
@@ -176,6 +186,8 @@ class ToolExecutorRuntime:
         if self._renderer is not None and not self._display.quiet:
             for call in tool_calls:
                 result = ordered_results[call.idx]
+                if not self._should_render_generic_tool_event(call.name):
+                    continue
                 self._renderer.show_tool_call(call.name, call.args)
                 self._renderer.show_tool_result(call.name, result.output)
 
@@ -209,7 +221,7 @@ class ToolExecutorRuntime:
 
     def _execute_parallel(self, batch: _Batch) -> dict[int, ToolResult]:
         results: dict[int, ToolResult] = {}
-        if not self._display.quiet:
+        if self._trace_enabled():
             sys.stdout.write(f"\033[36m[Runtime] ▶ 并行执行 {len(batch.calls)} 个只读工具：{[c.name for c in batch.calls]}\033[0m\n")
 
         with ThreadPoolExecutor(max_workers=len(batch.calls)) as pool:
@@ -233,24 +245,9 @@ class ToolExecutorRuntime:
     def _execute_serial(self, batch: _Batch) -> dict[int, ToolResult]:
         results: dict[int, ToolResult] = {}
         for call in batch.calls:
-            if not self._display.quiet:
+            if self._trace_enabled():
                 sys.stdout.write(f"\033[36m[Runtime] ▶ 串行执行写工具：{call.name}\033[0m\n")
             results[call.idx] = self._run_single(call)
-            if (
-                call.name == "todo"
-                and results[call.idx].success
-                and self._renderer is not None
-                and not self._display.quiet
-            ):
-                todo_state = getattr(self._context.session_state, "todo_state", None)
-                if todo_state is not None and todo_state.items:
-                    self._renderer.show_progress(todo_state.items)
-                elif todo_state is not None and todo_state.last_completed_items:
-                    self._renderer.show_completion_summary(
-                        completed=len(todo_state.last_completed_items),
-                        total=len(todo_state.last_completed_items),
-                        elapsed=0.0,
-                    )
         return results
 
     def _run_single(self, call: ToolCall) -> ToolResult:
@@ -283,25 +280,33 @@ class ToolExecutorRuntime:
         thread = threading.Thread(target=run)
         thread.start()
 
-        shown_progress = False
+        shown_trace_progress = False
+        shown_compact_status = False
         while thread.is_alive():
             thread.join(timeout=1.0)
             if thread.is_alive():
                 elapsed = int(time.time() - start)
                 if elapsed >= 2:
-                    if not self._display.quiet:
+                    if self._trace_enabled():
                         sys.stdout.write(f"\r\033[K\033[36m[Runtime]   ⏳ {call.name} 执行中... {elapsed}s\033[0m")
                         sys.stdout.flush()
-                        shown_progress = True
+                        shown_trace_progress = True
+                    elif (
+                        self._renderer is not None
+                        and not self._display.quiet
+                        and not shown_compact_status
+                    ):
+                        self._renderer.show_status(f"{call.name} 执行中... {elapsed}s")
+                        shown_compact_status = True
 
-        if shown_progress and not self._display.quiet:
+        if shown_trace_progress and not self._display.quiet:
             sys.stdout.write("\r\033[K")
             sys.stdout.flush()
 
         elapsed = time.time() - start
 
         if error_holder:
-            if not self._display.quiet:
+            if self._trace_enabled():
                 sys.stdout.write(f"\033[36m[Runtime]   ✗ {call.name} 异常 ({elapsed:.2f}s): {error_holder[0]}\033[0m\n")
             return ToolResult(
                 output=f"Internal error: {error_holder[0]}",
@@ -310,6 +315,6 @@ class ToolExecutorRuntime:
             )
 
         result = result_holder[0]
-        if not self._display.quiet:
+        if self._trace_enabled():
             sys.stdout.write(f"\033[36m[Runtime]   ✓ {call.name} 完成 ({elapsed:.2f}s, success={result.success})\033[0m\n")
         return result

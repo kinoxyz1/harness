@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.query.result import QueryResult, StopReason
 from core.query.state import RunState
+from core.session.state import TodoItem
 from core.tools.runtime import ToolBatchResult, ToolCall
 
 
@@ -22,6 +23,88 @@ def _parse_tool_calls(raw_calls: list) -> list[ToolCall]:
                 args=args,
             ))
     return calls
+
+
+def _tool_fallback_fragment(name: str) -> str | None:
+    mapping = {
+        "skill": "加载 skill，再重新评估下一步",
+        "todo": "更新当前计划",
+        "read_file": "读取文件内容",
+        "bash": "执行命令并收集输出",
+        "find": "定位相关信息",
+        "edit_file": "编辑现有文件",
+        "write_file": "写入文件内容",
+    }
+    return mapping.get(name)
+
+
+def _build_tool_fallback_status(tool_calls: list[ToolCall]) -> str | None:
+    fragments: list[str] = []
+    for call in tool_calls:
+        fragment = _tool_fallback_fragment(call.name)
+        if not fragment:
+            continue
+        normalized = fragment.strip().rstrip("。；")
+        if normalized:
+            fragments.append(normalized)
+        if call.name == "skill":
+            break
+
+    if not fragments:
+        return None
+
+    parts = [f"先{fragments[0]}"]
+    parts.extend(f"然后{fragment}" for fragment in fragments[1:])
+    return "；".join(parts) + "。"
+
+
+def _clone_todo_items(items: list[TodoItem]) -> list[TodoItem]:
+    return [
+        TodoItem(
+            content=item.content,
+            active_form=item.active_form,
+            status=item.status,
+            workflow_ref=item.workflow_ref,
+        )
+        for item in items
+    ]
+
+
+def _todo_write_succeeded(batch: ToolBatchResult) -> bool:
+    successes = batch.tool_successes or []
+    return any(
+        name == "todo" and idx < len(successes) and successes[idx]
+        for idx, name in enumerate(batch.tool_names)
+    )
+
+
+def _render_todo_state_update(renderer, session_state, state: RunState, batch: ToolBatchResult) -> None:
+    if renderer is None or not _todo_write_succeeded(batch):
+        return
+
+    todo_state = session_state.todo_state
+    if todo_state.items:
+        if state.last_displayed_todo_items != todo_state.items:
+            renderer.show_progress(todo_state.items)
+            state.last_displayed_todo_items = _clone_todo_items(todo_state.items)
+            return
+
+        current = next((item for item in todo_state.items if item.status == "in_progress"), None)
+        if current is not None:
+            completed = sum(1 for item in todo_state.items if item.status == "completed")
+            renderer.show_current_todo(current, completed, len(todo_state.items))
+        return
+
+    if todo_state.last_completed_items:
+        renderer.show_completion_summary(
+            completed=len(todo_state.last_completed_items),
+            total=len(todo_state.last_completed_items),
+            elapsed=0.0,
+        )
+        state.last_displayed_todo_items = []
+        return
+
+    state.last_displayed_todo_items = []
 
 
 def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
@@ -111,8 +194,15 @@ class QueryLoop:
                 )
 
             if model_resp.tool_calls:
-                _note_assistant_turn(state, model_resp)
                 parsed_calls = _parse_tool_calls(model_resp.tool_calls)
+                if renderer:
+                    if model_resp.content.strip():
+                        renderer.show_assistant(model_resp.content)
+                    else:
+                        fallback_status = _build_tool_fallback_status(parsed_calls)
+                        if fallback_status:
+                            renderer.show_status(fallback_status)
+                _note_assistant_turn(state, model_resp)
                 batch = tool_runtime.execute_batch(parsed_calls)
                 store.extend(batch.tool_results)
                 state.turn_count += 1
@@ -137,6 +227,7 @@ class QueryLoop:
 
                 # Apply context patches and barrier
                 _apply_batch_control_plane(state, batch)
+                _render_todo_state_update(renderer, session_state, state, batch)
 
                 after_messages = policy_runner.after_tool_batch(session_state, state, batch)
                 if after_messages:

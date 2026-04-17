@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from core.session.state import TodoItem
 
 
 @dataclass(slots=True)
@@ -20,3 +23,6 @@ class RunState:
     todo_replan_required: bool = False
     todo_replan_reason: str | None = None
     assistant_turns_since_todo: int = 0
+    # Snapshot used for display diffing. Callers should assign a copied list
+    # when updating this field to avoid aliasing with mutable todo state.
+    last_displayed_todo_items: list["TodoItem"] | None = None

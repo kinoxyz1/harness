@@ -106,7 +106,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
 
     # 安全检查：需确认
     if cmd_name in CONFIRM_COMMANDS:
-        answer = input(f"\033[31m⚠ Command '{command}' looks dangerous. Run anyway? [y/N]: \033[0m")
+        answer = input(f"\033[31m⚠ Command '{command}' looks dangerous. Run anyway? [y/N]: \n \033[0m")
         if answer.strip().lower() not in ("y", "yes"):
             return ToolResult(output="Command cancelled by user.", success=False, error="cancelled")
 

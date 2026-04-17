@@ -52,3 +52,23 @@ def test_skill_tool_rejects_unknown_skill(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.error == "not_found"
+
+
+def test_skill_tool_does_not_write_direct_stdout(tmp_path: Path, capsys) -> None:
+    from core.tools.builtin.skill import handle
+
+    _write_skill(
+        tmp_path,
+        "analysis-report",
+        "---\nname: Analysis Report\ndescription: Generate reports\n---\n\nFollow the workflow.\n",
+    )
+    registry = SkillRegistry()
+    catalog = registry.discover(tmp_path / ".harness" / "skills", working_dir=tmp_path)
+    state = SessionState(conversation_messages=[], skill_catalog=catalog)
+    ctx = _make_context(tmp_path, state, registry)
+
+    result = handle({"skill": "analysis-report"}, ctx)
+    captured = capsys.readouterr()
+
+    assert result.success is True
+    assert captured.out == ""
