@@ -1,5 +1,5 @@
 from .state import SessionState
 from .store import SessionStore
-from .view_builder import MessageView, MessageViewBuilder
+from .view_builder import ModelInputView, MessageViewBuilder
 
-__all__ = ["MessageView", "MessageViewBuilder", "SessionState", "SessionStore"]
+__all__ = ["ModelInputView", "MessageViewBuilder", "SessionState", "SessionStore"]

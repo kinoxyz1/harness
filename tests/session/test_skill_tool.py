@@ -18,7 +18,7 @@ def _make_context(tmp_path: Path, state: SessionState, registry: SkillRegistry) 
     return ctx
 
 
-def test_skill_tool_returns_injected_runtime_message_and_barrier(tmp_path: Path) -> None:
+def test_skill_tool_records_skill_in_state_with_barrier(tmp_path: Path) -> None:
     from core.tools.builtin.skill import handle
 
     _write_skill(
@@ -35,10 +35,9 @@ def test_skill_tool_returns_injected_runtime_message_and_barrier(tmp_path: Path)
 
     assert result.success is True
     assert result.barrier == ExecutionBarrier(stop_after_tool=True, reason="skill_expanded")
-    assert len(result.injected_messages) == 1
-    assert "<skill-runtime>" in result.injected_messages[0]["content"]
-    assert "Follow the workflow." in result.injected_messages[0]["content"]
+    assert result.injected_messages == []
     assert "analysis-report" in state.invoked_skills
+    assert "Follow the workflow." in state.invoked_skills["analysis-report"].content
 
 
 def test_skill_tool_rejects_unknown_skill(tmp_path: Path) -> None:

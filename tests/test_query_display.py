@@ -7,7 +7,7 @@ from core.query.loop import QueryLoop
 from core.query.result import StopReason
 from core.session.state import SessionState, TodoItem, TodoState
 from core.session.store import SessionStore
-from core.session.view_builder import MessageView
+from core.session.view_builder import ModelInputView
 from core.tools.runtime import ToolBatchResult
 
 
@@ -39,15 +39,15 @@ class FakeRenderer:
 
 
 class FakeViewBuilder:
-    def build(self, state: SessionState, *, run_state=None) -> MessageView:
-        return MessageView(messages=list(state.conversation_messages), tools=None)
+    def build(self, state: SessionState, *, run_state=None, prompt_assembler=None, working_dir=".", project_root=None, transcript_char_budget=None) -> ModelInputView:
+        return ModelInputView(system="SYSTEM", messages=list(state.conversation_messages), tools=None)
 
 
 class FakeModelGateway:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
 
-    def call_once(self, messages, *, tools):
+    def call_once(self, messages, *, system="", tools):
         return self._responses.pop(0)
 
 

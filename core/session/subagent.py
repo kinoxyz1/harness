@@ -213,9 +213,8 @@ class SubagentRuntime:
             view_builder=MessageViewBuilder(tools=sub_schemas),
         )
 
-        # 预填充系统提示和环境上下文
-        engine.append_message({"role": "system", "content": system_prompt})
-        engine.append_message({"role": "user", "content": env_context})
+        # Set system prompt override so PromptAssembler includes it in stable context
+        engine.state.system_prompt_override = system_prompt
 
         # 执行任务
         result = engine.submit_user_message(request.task)

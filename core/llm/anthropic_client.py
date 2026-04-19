@@ -74,20 +74,40 @@ class AnthropicClient:
     def call(
         self,
         messages: list[dict[str, Any]],
+        system: str = "",
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
         display: RunDisplayOptions | None = None,
     ) -> LLMResponse:
+        """执行一次 Anthropic API 调用。
+
+        system 合并策略：将外部传入的 system 参数与 normalize_messages 从 messages
+        中提取的系统文本合并为 full_system，确保不会丢失任何系统级指令。
+
+        Args:
+            messages: 对话消息列表。
+            system: 外部传入的系统提示（来自 ModelInputView.system）。
+            tools: 可用工具 schema 列表。
+            stream: 是否流式输出（当前未实现）。
+            display: 显示选项，控制是否打印计时和 token 统计。
+
+        Returns:
+            LLMResponse 包含 content、tool_calls、reasoning、token 统计等。
+
+        Raises:
+            NotImplementedError: stream=True 时。
+        """
         if stream:
             raise NotImplementedError("Streaming is not supported in this migration")
 
         display = display or RunDisplayOptions()
 
-        system, api_messages = normalize_messages(messages)
+        normalized_system, api_messages = normalize_messages(messages)
+        full_system = "\n\n".join(part for part in [system, normalized_system] if part)
 
         params: dict[str, Any] = {
             "model": MODEL,
-            "system": system,
+            "system": full_system,
             "messages": api_messages,
             "max_tokens": MAX_TOKENS,
         }

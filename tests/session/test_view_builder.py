@@ -1,32 +1,37 @@
-from __future__ import annotations
-
 from pathlib import Path
 
+from core.prompt.assembler import PromptAssembler
 from core.query.state import RunState
 from core.session.state import SessionState
-from core.session.view_builder import MessageViewBuilder
+from core.session.view_builder import MessageViewBuilder, ModelInputView
 
 
-def test_build_returns_conversation_messages_directly(tmp_path: Path) -> None:
+def test_build_returns_system_and_transcript_slice_separately(tmp_path: Path) -> None:
     state = SessionState(
         conversation_messages=[
-            {"role": "system", "content": "stable prompt"},
             {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
         ],
     )
     builder = MessageViewBuilder()
+    assembler = PromptAssembler()
 
-    view = builder.build(state)
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+    )
 
-    assert len(view.messages) == 2
-    assert view.messages[0]["content"] == "stable prompt"
-    assert view.messages[1] == {"role": "user", "content": "hello"}
+    assert isinstance(view, ModelInputView)
+    assert isinstance(view.system, str)
+    assert view.messages == state.conversation_messages
+    assert "transcript_slice" in view.internal_runtime_view
 
 
 def test_build_with_run_state_filters_tools(tmp_path: Path) -> None:
-    state = SessionState(
-        conversation_messages=[{"role": "system", "content": "stable"}],
-    )
+    state = SessionState(conversation_messages=[{"role": "user", "content": "hello"}])
     run_state = RunState(allowed_tools_override={"todo"})
     builder = MessageViewBuilder(
         tools=[
@@ -34,23 +39,39 @@ def test_build_with_run_state_filters_tools(tmp_path: Path) -> None:
             {"name": "todo", "description": "todo", "input_schema": {"type": "object", "properties": {}, "required": []}},
         ]
     )
+    assembler = PromptAssembler()
 
-    view = builder.build(state, run_state=run_state)
+    view = builder.build(
+        state,
+        run_state=run_state,
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+    )
 
     assert [tool["name"] for tool in view.tools] == ["todo"]
 
 
-def test_build_without_run_state_returns_all_tools(tmp_path: Path) -> None:
+def test_build_respects_transcript_char_budget(tmp_path: Path) -> None:
+    long_text = "x" * 300
     state = SessionState(
-        conversation_messages=[{"role": "system", "content": "stable"}],
+        conversation_messages=[
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": long_text},
+            {"role": "user", "content": "u2"},
+        ],
     )
-    builder = MessageViewBuilder(
-        tools=[
-            {"name": "skill", "description": "skill", "input_schema": {"type": "object", "properties": {}, "required": []}},
-            {"name": "todo", "description": "todo", "input_schema": {"type": "object", "properties": {}, "required": []}},
-        ]
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+        transcript_char_budget=50,
     )
 
-    view = builder.build(state)
-
-    assert [tool["name"] for tool in view.tools] == ["skill", "todo"]
+    assert view.messages[-1] == {"role": "user", "content": "u2"}
+    assert sum(len(m.get("content", "")) for m in view.messages if isinstance(m.get("content"), str)) <= 50

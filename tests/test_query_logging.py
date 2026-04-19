@@ -9,7 +9,7 @@ from core.query.result import StopReason
 from core.llm.response import ModelResponse
 from core.session.state import SessionState
 from core.session.store import SessionStore
-from core.session.view_builder import MessageView
+from core.session.view_builder import ModelInputView
 from core.tools.runtime import ToolBatchResult
 
 
@@ -30,12 +30,12 @@ class FakeRenderer:
 
 
 class FakeViewBuilder:
-    def build(self, state: SessionState, *, run_state=None) -> MessageView:
-        return MessageView(messages=list(state.conversation_messages), tools=None)
+    def build(self, state: SessionState, *, run_state=None, prompt_assembler=None, working_dir=".", project_root=None, transcript_char_budget=None) -> ModelInputView:
+        return ModelInputView(system="SYSTEM", messages=list(state.conversation_messages), tools=None)
 
 
 class FakeModelGateway:
-    def call_once(self, messages, *, tools):
+    def call_once(self, messages, *, system="", tools):
         return ModelResponse(
             content="final answer",
             reasoning="reasoning trace",
@@ -57,7 +57,7 @@ class FakeModelGatewayWithToolTurn:
             ),
         ]
 
-    def call_once(self, messages, *, tools):
+    def call_once(self, messages, *, system="", tools):
         return self._responses.pop(0)
 
 

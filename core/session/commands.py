@@ -26,6 +26,23 @@ def is_skills_command(raw: str) -> bool:
 
 
 def execute_skills_command(raw: str, *, state, registry: SkillRegistry) -> CommandResult:
+    """执行 /skills 子命令。
+
+    支持的子命令：
+    - list: 列出所有已发现的 skill
+    - show <id>: 显示 skill 的完整内容
+    - use <id>: 激活一个 skill（记录到 state.invoked_skills，不污染 transcript）
+    - off <id>: 提示 inline skill 无法停用
+    - reload: 重新扫描 skills 目录并更新 revision
+
+    Args:
+        raw: 完整的命令字符串。
+        state: 会话状态。
+        registry: Skill 注册器，用于加载 skill 内容。
+
+    Returns:
+        CommandResult(handled, output) — handled 恒为 True，output 为可读文本。
+    """
     parts = raw.strip().split()
     if len(parts) < 2:
         return CommandResult(True, "Usage: /skills list|show <id>|use <id>|off <id>|reload")
@@ -54,7 +71,7 @@ def execute_skills_command(raw: str, *, state, registry: SkillRegistry) -> Comma
             return CommandResult(True, f"Skill not found: {skill_id}")
         content = registry.load(skill_id)
         try:
-            message = apply_skill_invocation(
+            apply_skill_invocation(
                 state=state,
                 skill_id=skill_id,
                 content=content,
@@ -62,13 +79,12 @@ def execute_skills_command(raw: str, *, state, registry: SkillRegistry) -> Comma
             )
         except ValueError as exc:
             return CommandResult(True, str(exc))
-        state.conversation_messages.append(message)
         state.skill_events.append(
             SkillEvent(
                 skill_id=skill_id,
                 action="activated",
                 source="user_command",
-                conversation_index=len(state.conversation_messages) - 1,
+                conversation_index=len(state.conversation_messages),
             )
         )
         ref_count = len(content.reference_bodies)

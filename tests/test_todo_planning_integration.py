@@ -59,7 +59,7 @@ class StubModelGateway:
     def __init__(self, responses: list[SimpleNamespace]) -> None:
         self._responses = list(responses)
 
-    def call_once(self, messages, *, tools):
+    def call_once(self, messages, *, system="", tools):
         return self._responses.pop(0)
 
 

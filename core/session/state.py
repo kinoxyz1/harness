@@ -34,6 +34,7 @@ class SessionState:
     invoked_skills: dict[str, InvokedSkillRecord] = field(default_factory=dict)
     skills_revision: str | None = None
     read_file_state: dict[str, Any] = field(default_factory=dict)
+    system_prompt_override: str | None = None
     session_metadata: dict[str, Any] = field(default_factory=dict)
     usage_totals: dict[str, int] = field(default_factory=dict)
     todo_state: TodoState = field(default_factory=TodoState)

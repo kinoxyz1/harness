@@ -27,8 +27,8 @@ Agent Loop 已启动。输入 exit 或 quit 退出。
 >> 你好
 你好！有什么可以帮你的吗？
 
->> 阅读 test/test.txt 并用 Python 解决问题
-⚡ Read(test/test.txt)       → 读取文件内容
+>> 阅读 tests/test.txt 并用 Python 解决问题
+⚡ Read(tests/test.txt)       → 读取文件内容
 ⚡ Bash(python solve.py)     → 编写并运行解题脚本
 ✅ 完成题目
 ✅ 清理临时文件

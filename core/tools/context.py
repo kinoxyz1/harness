@@ -150,5 +150,7 @@ class ToolUseContext:
     def bind_runtime(self, *, session_state: Any | None = None, skill_registry: Any | None = None) -> None:
         if session_state is not None:
             self._session_state = session_state
+            if hasattr(session_state, "read_file_state") and isinstance(session_state.read_file_state, dict):
+                self._file_state = session_state.read_file_state
         if skill_registry is not None:
             self._skill_registry = skill_registry

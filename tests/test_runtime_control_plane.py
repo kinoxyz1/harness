@@ -52,7 +52,7 @@ class _BarrierTool:
         return ToolResult(
             output="skill expanded",
             success=True,
-            injected_messages=[{"role": "system", "content": "<skill-runtime>expanded</skill-runtime>"}],
+            injected_messages=[],
             barrier=ExecutionBarrier(stop_after_tool=True, reason="skill_expanded"),
         )
 
@@ -81,7 +81,7 @@ def test_runtime_returns_explicit_skipped_result_after_skill_barrier(tmp_path) -
 
     assert batch.barrier == ExecutionBarrier(stop_after_tool=True, reason="skill_expanded")
     assert batch.tool_results[1]["content"].startswith("(skipped: superseded by skill_expanded barrier")
-    assert batch.injected_messages == [{"role": "system", "content": "<skill-runtime>expanded</skill-runtime>"}]
+    assert batch.injected_messages == []
 
 
 def test_apply_batch_control_plane_merges_patches() -> None:

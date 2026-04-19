@@ -40,7 +40,22 @@ ANNOTATIONS: dict[str, bool] = {
 
 
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-    """Load a skill inline, injecting its content into the current context."""
+    """处理 skill 工具调用：激活指定的 skill。
+
+    激活后返回 barrier（stop_after_tool=True, reason="skill_expanded"），
+    使 QueryLoop 停止当前工具批次，让模型在下一轮看到新激活的 skill 指令。
+
+    不再向 transcript 注入消息，skill 内容通过 state.invoked_skills 渲染。
+
+    Args:
+        args: 工具参数，包含 "skill"（skill ID）和可选的 "args"。
+        context: 工具执行上下文，提供 session_state 和 skill_registry。
+
+    Returns:
+        ToolResult:
+        - success=True: skill 已激活，barrier 设为 skill_expanded
+        - success=False: skill 未找到 / 预算超限 / 运行时不可用
+    """
     skill_id = args.get("skill", "").strip()
     if not skill_id:
         return ToolResult(output="Missing skill parameter", success=False, error="missing_params")
@@ -59,7 +74,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         return ToolResult(output=f"Failed to load skill: {exc}", success=False, error="load_failed")
 
     try:
-        message = apply_skill_invocation(
+        apply_skill_invocation(
             state=state,
             skill_id=skill_id,
             content=content,
@@ -71,6 +86,6 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     return ToolResult(
         output=f"Skill loaded: {skill_id}. Re-evaluate your next action using the injected skill guidance.",
         success=True,
-        injected_messages=[message],
+        injected_messages=[],
         barrier=ExecutionBarrier(stop_after_tool=True, reason="skill_expanded"),
     )

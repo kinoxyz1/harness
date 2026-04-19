@@ -108,7 +108,13 @@ def _render_todo_state_update(renderer, session_state, state: RunState, batch: T
 
 
 def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
-    """Apply context patches and barrier from tool batch to run state."""
+    """将工具批次中的控制面信号应用到 RunState。
+
+    处理三种信号：
+    - ContextPatch: 工具对 allowed_tools / model / effort 的覆盖请求
+    - Barrier: 工具要求停止当前批次（如 skill_expanded）
+    - Todo 写入成功: 重置 replan 计数器（除非同时有 skill_expanded barrier）
+    """
     skill_expanded_barrier = False
     for patch in batch.context_patches:
         if patch.allowed_tools is not None:
@@ -152,7 +158,16 @@ def _note_assistant_turn(state: RunState, model_resp) -> None:
 
 
 class QueryLoop:
-    """管理一次 query run 的唯一主循环。"""
+    """管理一次 query run 的唯一主循环。
+
+    循环流程：
+    1. 调用 policy_runner 注入前置消息
+    2. 通过 view_builder 构建 ModelInputView（组装 system + 截取 transcript）
+    3. 调用 model_gateway 发送请求（system 和 messages 分通道传递）
+    4. 若模型返回 tool_calls → 执行工具批次 → 应用控制面补丁 → 继续循环
+    5. 若模型返回最终文本 → 返回 QueryResult
+    6. 若模型返回空响应 → 交给 recovery 处理
+    """
 
     def run(
         self,
@@ -168,6 +183,23 @@ class QueryLoop:
         recovery,
         renderer=None,
     ) -> QueryResult:
+        """执行一次完整的查询循环。
+
+        Args:
+            session_state: 会话级状态（跨 query 持久化），包含对话历史、skill、todo 等。
+            store: 消息存储，负责向 conversation_messages 追加消息。
+            view_builder: 消息视图构建器，将 state 转为 ModelInputView。
+            prompt_assembler: 提示词组装器，渲染 system prompt 的各部分。
+            model_gateway: 模型网关，执行单次 API 调用。
+            tool_runtime: 工具运行时，执行工具调用批次。
+            tool_context: 工具上下文，提供工作目录、文件状态等。
+            policy_runner: 策略运行器，注入前置/后置消息，控制循环终止。
+            recovery: 恢复管理器，处理空响应等异常情况。
+            renderer: UI 渲染器，展示思考过程、assistant 回复、工具状态等。
+
+        Returns:
+            QueryResult 包含最终输出、停止原因、使用的轮次等。
+        """
         state = RunState()
 
         while True:
@@ -175,9 +207,16 @@ class QueryLoop:
             if before_messages:
                 store.extend(before_messages)
 
-            view = view_builder.build(session_state, run_state=state)
+            working_dir = getattr(tool_context, "working_dir", None) or "."
+            view = view_builder.build(
+                session_state,
+                run_state=state,
+                prompt_assembler=prompt_assembler,
+                working_dir=working_dir,
+                project_root=getattr(tool_context, "working_dir", None),
+            )
             active_tools = None if state.stop_reason == "max_turns" else view.tools
-            model_resp = model_gateway.call_once(view.messages, tools=active_tools)
+            model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
             if renderer and getattr(model_resp, "reasoning", "").strip():
                 renderer.show_thinking("思考过程", model_resp.reasoning)
             state.last_model_response = model_resp
@@ -209,21 +248,18 @@ class QueryLoop:
                 state.tool_calls_executed += len(parsed_calls)
                 state.files_modified.extend(batch.files_modified)
 
-                # Handle injected messages (from skill expansion)
-                if batch.injected_messages:
-                    store.extend(batch.injected_messages)
-                    # Record skill events for model-initiated skill calls
-                    skill_calls = [call for call in parsed_calls if call.name == "skill"]
-                    for call in skill_calls:
-                        from core.skills.models import SkillEvent
-                        session_state.skill_events.append(
-                            SkillEvent(
-                                skill_id=call.args.get("skill", ""),
-                                action="activated",
-                                source="model_tool_call",
-                                conversation_index=len(session_state.conversation_messages) - 1,
-                            )
+                # Record skill events for model-initiated skill calls
+                skill_calls = [call for call in parsed_calls if call.name == "skill"]
+                for call in skill_calls:
+                    from core.skills.models import SkillEvent
+                    session_state.skill_events.append(
+                        SkillEvent(
+                            skill_id=call.args.get("skill", ""),
+                            action="activated",
+                            source="model_tool_call",
+                            conversation_index=len(session_state.conversation_messages) - 1,
                         )
+                    )
 
                 # Apply context patches and barrier
                 _apply_batch_control_plane(state, batch)
