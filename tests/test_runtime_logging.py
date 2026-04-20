@@ -235,6 +235,36 @@ def test_renderer_summarizes_skill_and_read_results_compactly() -> None:
     assert "已找到 2 个匹配文件" in output
 
 
+def test_renderer_marks_runtime_truncation_in_read_file_summary() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_result(
+        "read_file",
+        "1\talpha\n2\tbeta\n\n... (输出已截断，原始 50000 字符，显示前 30000 字符)",
+    )
+
+    output = console.export_text()
+
+    assert "runtime 截断" in output
+    assert "不是文件只有这些内容" in output
+
+
+def test_renderer_marks_runtime_truncation_in_generic_preview() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_result(
+        "bash",
+        "header\nvalue\n\n... (输出已截断，原始 50000 字符，显示前 30000 字符)",
+    )
+
+    output = console.export_text()
+
+    assert "runtime 截断" in output
+    assert "不是文件只有这些内容" in output
+
+
 def test_renderer_renders_bracket_labels_and_results_literally() -> None:
     console = Console(record=True, width=120)
     renderer = RichRenderer(console)

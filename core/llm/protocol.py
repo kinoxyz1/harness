@@ -73,6 +73,18 @@ def _convert_assistant(msg: dict[str, Any]) -> dict[str, Any]:
     """转换内部 assistant 消息，把 tool_calls 转为 tool_use blocks。"""
     content_blocks: list[dict[str, Any]] = []
 
+    # Include thinking block if present (for reasoning persistence)
+    reasoning = msg.get("reasoning")
+    reasoning_signature = msg.get("reasoning_signature")
+    if reasoning:
+        thinking_block: dict[str, Any] = {
+            "type": "thinking",
+            "thinking": reasoning,
+        }
+        if reasoning_signature:
+            thinking_block["signature"] = reasoning_signature
+        content_blocks.append(thinking_block)
+
     text = msg.get("content")
     if text:
         content_blocks.append({"type": "text", "text": text})

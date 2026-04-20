@@ -53,4 +53,5 @@ class ModelGateway:
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
             reasoning=response.reasoning or "",
+            reasoning_signature=response.reasoning_signature or "",
         )

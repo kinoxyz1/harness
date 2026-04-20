@@ -157,7 +157,7 @@ def test_query_loop_shows_ui_only_fallback_for_empty_tool_turn() -> None:
         renderer=renderer,
     )
 
-    fallback = "先加载 skill，再重新评估下一步。"
+    fallback = "先加载 analysis-report skill，再重新评估下一步。"
 
     assert result.stop_reason == StopReason.COMPLETED
     assert renderer.assistant_calls == []
@@ -203,7 +203,7 @@ def test_query_loop_composes_fallback_for_three_tools() -> None:
     )
 
     assert result.stop_reason == StopReason.COMPLETED
-    assert renderer.status_calls == ["先执行命令并收集输出；然后定位相关信息；然后写入文件内容。"]
+    assert renderer.status_calls == ["先执行: ls；然后搜索: QueryLoop；然后写入 tmp.txt。"]
 
 
 def test_query_loop_truncates_fallback_after_skill_barrier() -> None:
@@ -240,7 +240,7 @@ def test_query_loop_truncates_fallback_after_skill_barrier() -> None:
     )
 
     assert result.stop_reason == StopReason.COMPLETED
-    assert renderer.status_calls == ["先读取文件内容；然后加载 skill，再重新评估下一步。"]
+    assert renderer.status_calls == ["先读取 README.md；然后加载 analysis-report skill，再重新评估下一步。"]
 
 
 def test_query_loop_composes_fallback_for_single_tool() -> None:
@@ -275,7 +275,7 @@ def test_query_loop_composes_fallback_for_single_tool() -> None:
     )
 
     assert result.stop_reason == StopReason.COMPLETED
-    assert renderer.status_calls == ["先更新当前计划。"]
+    assert renderer.status_calls == ["先更新计划。"]
 
 
 def test_query_loop_renders_full_todo_plan_once_then_current_focus() -> None:

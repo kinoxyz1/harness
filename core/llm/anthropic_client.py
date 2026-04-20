@@ -36,10 +36,12 @@ class LLMResponse:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         reasoning: str | None = None,
+        reasoning_signature: str | None = None,
     ) -> None:
         self.content = content
         self.tool_calls = tool_calls or []
         self.reasoning = reasoning
+        self.reasoning_signature = reasoning_signature
         self.finish_reason = finish_reason
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
@@ -163,6 +165,7 @@ def _parse_response(response: Any) -> LLMResponse:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     reasoning: str | None = None
+    reasoning_signature: str | None = None
 
     for block in response.content:
         if block.type == "text":
@@ -175,6 +178,7 @@ def _parse_response(response: Any) -> LLMResponse:
             })
         elif block.type == "thinking":
             reasoning = block.thinking
+            reasoning_signature = getattr(block, "signature", None)
 
     content = "\n".join(text_parts) if text_parts else None
 
@@ -188,4 +192,5 @@ def _parse_response(response: Any) -> LLMResponse:
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         reasoning=reasoning,
+        reasoning_signature=reasoning_signature,
     )

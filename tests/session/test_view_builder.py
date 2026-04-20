@@ -75,3 +75,35 @@ def test_build_respects_transcript_char_budget(tmp_path: Path) -> None:
 
     assert view.messages[-1] == {"role": "user", "content": "u2"}
     assert sum(len(m.get("content", "")) for m in view.messages if isinstance(m.get("content"), str)) <= 50
+
+
+def test_build_keeps_tool_use_with_trailing_tool_result_when_budget_is_tight(tmp_path: Path) -> None:
+    tool_result = "x" * 30_000
+    state = SessionState(
+        conversation_messages=[
+            {"role": "user", "content": "Analyze the CSV"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "toolu_read_1", "name": "read_file", "args": {"path": "data.csv"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "toolu_read_1", "content": tool_result},
+        ],
+    )
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+        transcript_char_budget=24_000,
+    )
+
+    assert [message["role"] for message in view.messages] == ["assistant", "tool"]
+    assert view.messages[0]["tool_calls"][0]["id"] == "toolu_read_1"
+    assert view.messages[1]["tool_call_id"] == "toolu_read_1"

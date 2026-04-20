@@ -44,6 +44,7 @@ def _preview_output(output: str, *, max_lines: int = 10, max_chars: int = 1200) 
     if not output:
         return "(无输出)"
 
+    runtime_truncated = _has_runtime_truncation_marker(output)
     lines = output.splitlines()
     preview_lines = list(islice(lines, max_lines))
     preview = "\n".join(preview_lines)
@@ -51,9 +52,18 @@ def _preview_output(output: str, *, max_lines: int = 10, max_chars: int = 1200) 
     if len(preview) > max_chars:
         preview = preview[:max_chars]
         truncated = True
+    if runtime_truncated:
+        preview = (
+            "[提示] 这是 runtime 截断，不是文件只有这些内容。\n"
+            + preview
+        )
     if truncated:
         preview += "\n... (已省略后续输出)"
     return preview
+
+
+def _has_runtime_truncation_marker(output: str) -> bool:
+    return "输出已截断，原始 " in output and "显示前 " in output
 
 
 def _line_count_preview(output: str) -> int | None:
@@ -80,7 +90,10 @@ def _tool_result_summary(name: str, output: str) -> str | None:
     if name == "read_file":
         line_count = _line_count_preview(output)
         if line_count is not None:
-            return f"已读取文件内容，预览 {line_count} 行"
+            summary = f"已读取文件内容，预览 {line_count} 行"
+            if _has_runtime_truncation_marker(output):
+                summary += "（runtime 截断，不是文件只有这些内容）"
+            return summary
 
     if name == "find":
         stripped = output.strip()

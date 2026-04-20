@@ -25,23 +25,39 @@ def _parse_tool_calls(raw_calls: list) -> list[ToolCall]:
     return calls
 
 
-def _tool_fallback_fragment(name: str) -> str | None:
-    mapping = {
-        "skill": "加载 skill，再重新评估下一步",
-        "todo": "更新当前计划",
-        "read_file": "读取文件内容",
-        "bash": "执行命令并收集输出",
-        "find": "定位相关信息",
-        "edit_file": "编辑现有文件",
-        "write_file": "写入文件内容",
-    }
-    return mapping.get(name)
+def _tool_fallback_fragment(call: ToolCall) -> str | None:
+    """从工具调用中生成包含具体信息的 fallback 文本。"""
+    args = call.args or {}
+    name = call.name
+
+    if name == "bash":
+        cmd = args.get("command", "")
+        preview = cmd[:80] + ("..." if len(cmd) > 80 else "")
+        return f"执行: {preview}" if preview else "执行命令"
+    if name == "read_file":
+        path = args.get("file_path", args.get("path", ""))
+        return f"读取 {path}" if path else "读取文件"
+    if name == "skill":
+        skill_name = args.get("skill", "")
+        return f"加载 {skill_name} skill，再重新评估下一步"
+    if name == "todo":
+        return "更新计划"
+    if name == "edit_file":
+        path = args.get("file_path", args.get("path", ""))
+        return f"编辑 {path}" if path else "编辑文件"
+    if name == "write_file":
+        path = args.get("file_path", args.get("path", ""))
+        return f"写入 {path}" if path else "写入文件"
+    if name == "find":
+        pattern = args.get("pattern", "")
+        return f"搜索: {pattern}" if pattern else "搜索文件"
+    return None
 
 
 def _build_tool_fallback_status(tool_calls: list[ToolCall]) -> str | None:
     fragments: list[str] = []
     for call in tool_calls:
-        fragment = _tool_fallback_fragment(call.name)
+        fragment = _tool_fallback_fragment(call)
         if not fragment:
             continue
         normalized = fragment.strip().rstrip("。；")

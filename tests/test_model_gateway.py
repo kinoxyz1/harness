@@ -18,6 +18,7 @@ class FakeClient:
             prompt_tokens=10,
             completion_tokens=20,
             reasoning="step by step",
+            reasoning_signature="sig_123",
         )
 
 

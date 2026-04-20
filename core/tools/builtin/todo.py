@@ -19,7 +19,14 @@ SCHEMA: dict[str, Any] = {
         "Keep exactly one in_progress item whenever active work exists. "
         "Update the plan as tasks complete or scope changes. "
         "If validation is required, include an explicit verification task. "
-        "Preserve meaningful workflow labels such as 2.5 when they are real and relevant."
+        "Preserve meaningful workflow labels such as 2.5 when they are real and relevant.\n\n"
+        "## Granularity & Detail\n"
+        "Each item should describe a concrete, verifiable step — not a vague phase. "
+        "Good: 'Read CSV with pandas, identify columns and dtypes, print shape and null counts'. "
+        "Bad: 'Read and analyze the data'. "
+        "Include specific actions (what to do), scope (which files/fields/APIs), and expected outcome (what success looks like). "
+        "When a skill provides numbered steps, break each step into its own item rather than grouping several together. "
+        "Prefer 8-15 focused items over 4-5 broad ones."
     ),
     "input_schema": {
         "type": "object",
@@ -32,11 +39,11 @@ SCHEMA: dict[str, Any] = {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "给用户看的祈使句任务描述",
+                                "description": "具体的祈使句任务描述，包含做什么(动作)、对什么(范围/目标)、产出什么(预期结果)。避免笼统概括，要让读者无需追问就知道这一步具体做什么",
                             },
                             "active_form": {
                                 "type": "string",
-                                "description": "进行时形式，用于显示当前聚焦工作",
+                                "description": "进行时形式的简短描述，用于显示当前聚焦工作，如 '正在解析 CSV 列结构和数据类型'",
                             },
                             "status": {
                                 "type": "string",

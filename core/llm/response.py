@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..shared.config import MAX_REASONING_CHARS, PERSIST_THINKING
+
 
 @dataclass(slots=True)
 class ModelResponse:
@@ -12,6 +14,7 @@ class ModelResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     reasoning: str = ""
+    reasoning_signature: str = ""
 
     @property
     def has_final_text(self) -> bool:
@@ -21,4 +24,9 @@ class ModelResponse:
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
         if self.tool_calls:
             message["tool_calls"] = self.tool_calls
+        if PERSIST_THINKING and self.reasoning and self.reasoning.strip():
+            truncated = self.reasoning[:MAX_REASONING_CHARS]
+            message["reasoning"] = truncated
+            if self.reasoning_signature:
+                message["reasoning_signature"] = self.reasoning_signature
         return message

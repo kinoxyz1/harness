@@ -56,6 +56,19 @@ class MessageViewBuilder:
             return len(str(content)[:6_000])
         return 0
 
+    def _find_matching_tool_use(self, messages: list[dict[str, Any]], *, tool_call_id: str, before_index: int) -> int | None:
+        """向前查找生成某个 tool_result 的 assistant tool_use 消息。"""
+        for idx in range(before_index - 1, -1, -1):
+            message = messages[idx]
+            if message.get("role") != "assistant":
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            if any(call.get("id") == tool_call_id for call in tool_calls if isinstance(call, dict)):
+                return idx
+        return None
+
     def _select_transcript_slice(
         self,
         messages: list[dict[str, Any]],
@@ -74,18 +87,35 @@ class MessageViewBuilder:
         Returns:
             截取后的消息子列表，保持原始顺序。
         """
-        selected: list[dict[str, Any]] = []
+        selected_indices: list[int] = []
         used = 0
-        for message in reversed(messages):
+        for idx in range(len(messages) - 1, -1, -1):
+            message = messages[idx]
             content = message.get("content", "")
             cost = self._content_char_cost(content)
-            if selected and used + cost > char_budget:
+            if selected_indices and used + cost > char_budget:
                 continue
-            selected.append(message)
+            selected_indices.append(idx)
             used += cost
             if used >= char_budget:
                 break
-        return list(reversed(selected))
+
+        if not selected_indices:
+            return []
+
+        expanded_indices = set(selected_indices)
+        for idx in list(selected_indices):
+            message = messages[idx]
+            if message.get("role") != "tool":
+                continue
+            tool_call_id = message.get("tool_call_id")
+            if not tool_call_id:
+                continue
+            assistant_idx = self._find_matching_tool_use(messages, tool_call_id=tool_call_id, before_index=idx)
+            if assistant_idx is not None:
+                expanded_indices.add(assistant_idx)
+
+        return [messages[idx] for idx in sorted(expanded_indices)]
 
     def build(
         self,
