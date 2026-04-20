@@ -1,3 +1,28 @@
+"""提示词组装器 — 构建 system prompt 的三层结构。
+
+你在数据流中的位置：
+    MessageViewBuilder.build()
+      → prompt_assembler.build_stable()        ← 你在这里
+      → prompt_assembler.build_runtime()
+      → prompt_assembler.build_overlay()
+    → 拼接为完整的 system prompt
+
+三层设计（稳定性递减）：
+    1. stable（缓存层）：框架指令 + skill 目录
+       - 内容在 skill 不变时完全不变，可以通过 cache key 命中
+       - cache key = skills_revision + system_context sha256
+
+    2. runtime（动态层）：环境 + 激活的 skill + todo + 文件状态
+       - 每轮都重新渲染，因为 skill 激活状态、todo 进度、文件缓存都会变
+       - 包裹在 <runtime-context> XML 标签中
+
+    3. overlay（信号层）：replan 标记、barrier 原因
+       - 仅在有控制面信号时才生成
+       - 例如 skill 刚展开时注入 <todo-replan>skill_expanded</todo-replan>
+
+核心原则：所有 prompt 内容从 state 实时渲染，不依赖 transcript。
+这样即使 transcript 被截断，模型仍能看到完整的 skill 指令和 todo 状态。
+"""
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +41,11 @@ if TYPE_CHECKING:
 
 
 def _stable_cache_key(state: SessionState, *, project_root: str | None = None) -> str:
-    """生成 stable prompt 的缓存 key，由 skills_revision + system_context sha256 组成。"""
+    """生成 stable prompt 的缓存 key。
+
+    只有当 skill 文件发生修改或系统指令变更时，key 才会变化。
+    同一个会话内，大部分轮次都会命中缓存，避免重复渲染。
+    """
     system_prompt = get_system_context(project_root=project_root)
     digest = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
     revision = state.skills_revision or "no-skills"
@@ -24,7 +53,11 @@ def _stable_cache_key(state: SessionState, *, project_root: str | None = None) -
 
 
 def _render_skill_catalog(state: SessionState) -> str:
-    """将 state.skill_catalog 渲染为 <available-skills> XML，列出所有已发现的 skill 名称和描述。"""
+    """将 state.skill_catalog 渲染为 <available-skills> XML。
+
+    这是 stable 层的一部分，告诉模型"你可以用哪些 skill"。
+    模型看到匹配的 skill 后会调用 skill 工具加载它。
+    """
     if not state.skill_catalog:
         return ""
     lines = ["<available-skills>"]
@@ -40,7 +73,11 @@ def _render_skill_catalog(state: SessionState) -> str:
 
 
 def _render_todo_state(items: list[TodoItem]) -> str:
-    """将 todo 列表渲染为 <todo-state> XML，包含每项的 status 和 active_form。"""
+    """将 todo 列表渲染为 <todo-state> XML。
+
+    这是 runtime 层的一部分，让模型看到当前的计划进度。
+    模型基于此决定下一步做什么、是否需要刷新计划。
+    """
     if not items:
         return ""
     lines = ["<todo-state>"]
@@ -55,7 +92,11 @@ def _render_todo_state(items: list[TodoItem]) -> str:
 def _render_file_runtime(read_file_state: dict[str, Any], *, char_budget: int) -> str:
     """将 session 中已读文件的状态渲染为 <file-runtime> XML。
 
-    按最近读取时间倒序排列，每个文件最多截取 400 字符，总大小不超过 char_budget。
+    这是 runtime 层的一部分，让模型知道"我已经看过哪些文件"。
+    每个文件最多显示 400 字符的摘要，避免撑爆上下文。
+
+    为什么需要这个？因为 transcript slice 可能截断了早期的 read_file 工具调用，
+    但模型仍需要知道文件的概况来做决策。
     """
     from core.tools.context import FileState as _FileState
 
@@ -86,16 +127,13 @@ def _render_file_runtime(read_file_state: dict[str, Any], *, char_budget: int) -
 
 
 class PromptAssembler:
-    """提示词组装器：负责从 SessionState 中提取各类上下文并组装为发送给模型的 prompt。
-
-    核心设计原则：所有 prompt 内容都从 state 实时渲染，不依赖 transcript 中的历史消息。
-    这样即使 transcript 被压缩或截断，模型仍然能获得完整的运行时上下文。
+    """提示词组装器：从 SessionState 中提取上下文并组装 system prompt。
 
     提供 4 个组装接口，被 MessageViewBuilder 组合调用：
-    - build_stable_context: 稳定不变的系统提示（系统指令 + skill 目录 + 子代理后缀）
-    - build_runtime_context: 每轮变化的运行时上下文（环境 + 激活的 skill + todo + 文件）
-    - build_query_overlay: 单轮查询覆盖层（replan 标记、barrier 原因）
-    - build_internal_runtime_view: 调试用的内部状态快照
+    - build_stable: 稳定层（缓存命中则跳过渲染）
+    - build_runtime: 动态层（每轮重新渲染）
+    - build_query_overlay: 信号层（有信号时才生成）
+    - build_internal_runtime_view: 调试快照（不发送给模型）
     """
 
     def __init__(self, cache: PromptCache | None = None, skill_registry: SkillRegistry | None = None):
@@ -103,17 +141,14 @@ class PromptAssembler:
         self._skill_registry = skill_registry
 
     def build_stable(self, state: SessionState, *, project_root: str | None = None) -> str:
-        """构建稳定系统提示词并缓存。
+        """构建稳定系统提示词（第 1 层）。
 
-        内容组成：系统指令 + skill 目录（<available-skills>）+ system_prompt_override（子代理后缀）。
-        以 skills_revision + system_context sha256 为 key 缓存，skill 不变时直接命中。
+        组成：框架指令（_FRAMEWORK_PROMPT）+ skill 目录（<available-skills>）+ 子代理后缀。
 
-        Args:
-            state: 会话状态，包含 skill_catalog、skills_revision、prompt_cache 等。
-            project_root: 项目根目录，用于加载项目级系统指令。None 则使用默认指令。
-
-        Returns:
-            组装好的稳定系统提示词字符串。
+        缓存策略：
+        - cache key = skills_revision + system_context hash
+        - skill 文件没改 → 直接命中缓存 → 零渲染开销
+        - skill 文件改了 → 重新渲染 → 新内容写入缓存
         """
         cache_key = _stable_cache_key(state, project_root=project_root)
         cached = self._cache.get(state.prompt_cache, cache_key)
@@ -129,17 +164,13 @@ class PromptAssembler:
         return self._cache.set(state.prompt_cache, cache_key, stable_prompt)
 
     def build_active_skill_messages(self, state: SessionState) -> list[dict[str, str]]:
-        """将已激活的 skill 渲染为 <active-skills> 系统消息。
+        """将已激活的 skill 渲染为 <active-skills> 内容。
 
-        从 state.invoked_skills（而非 transcript）读取，按激活轮次排序。
-        每个 skill 包裹在 <active-skill id="..."> 标签中，内容为完整运行时指令。
+        从 state.invoked_skills 读取（不是 transcript），
+        所以即使 transcript 被截断，模型仍能看到完整的 skill 指令。
 
-        Args:
-            state: 会话状态，包含 invoked_skills 字典。
-
-        Returns:
-            长度为 0 或 1 的列表。空列表表示无激活 skill；
-            否则返回 [{"role": "system", "content": "<active-skills>..."}]。
+        Skill 激活后，其完整内容（包括引用文件）会被存储在 InvokedSkillRecord.content 中，
+        每轮都重新拼接到 runtime 层。
         """
         if not state.invoked_skills:
             return []
@@ -154,39 +185,27 @@ class PromptAssembler:
     def build_runtime_context(
         self, state: SessionState, *, working_dir: str, char_budget: int | None = None
     ) -> str:
-        """构建运行时上下文，包裹在 <runtime-context> XML 中。
+        """构建运行时上下文（第 2 层），包裹在 <runtime-context> 中。
 
-        内容组成（按顺序拼接）：
-        1. 用户环境信息（工作目录、系统信息等）
-        2. 已激活 skill 的指令内容
-        3. Todo 列表状态（<todo-state>）
-        4. 已读文件的摘要（<file-runtime>，最多 12K 字符）
+        内容组成（按优先级排列）：
+        1. 环境信息（工作目录、日期、平台）
+        2. 激活的 skill 指令（<active-skills>）
+        3. Todo 状态（<todo-state>）
+        4. 已读文件摘要（<file-runtime>，最多 12K 字符）
 
-        最终整体截断到 char_budget（默认 36K 字符）。
-
-        Args:
-            state: 会话状态，包含 invoked_skills、todo_state、read_file_state 等。
-            working_dir: 当前工作目录，用于生成环境信息。
-            char_budget: 总字符预算上限。None 则使用默认 36_000。
-
-        Returns:
-            "<runtime-context>...</runtime-context>" 字符串，或 ""（无内容时）。
+        整体截断到 char_budget（默认 36K 字符）。
         """
         total_budget = char_budget or 36_000
         parts: list[str] = []
-        # User context (environment info)
         user_ctx = get_user_context(working_dir)
         if user_ctx:
             parts.append(user_ctx)
-        # Active skill messages content
         active_msgs = self.build_active_skill_messages(state)
         if active_msgs:
             parts.append(active_msgs[0]["content"])
-        # Todo state
         todo_xml = _render_todo_state(state.todo_state.items)
         if todo_xml:
             parts.append(todo_xml)
-        # File runtime
         file_block = _render_file_runtime(state.read_file_state, char_budget=12_000)
         if file_block:
             parts.append(file_block)
@@ -198,17 +217,13 @@ class PromptAssembler:
         return f"<runtime-context>\n{body}\n</runtime-context>"
 
     def build_query_overlay(self, state: SessionState, run_state: RunState) -> str:
-        """构建单轮查询覆盖层，包含需要模型注意的控制面信号。
+        """构建单轮覆盖信号（第 3 层）。
 
-        当需要模型重新规划 todo（如 skill 扩展后）或 barrier 触发时，
-        生成 <query-overlay> 提示模型调整行为。
+        仅在有控制面信号时生成：
+        - <todo-replan>: skill 刚展开，需要模型重新规划 todo
+        - <barrier>: 工具要求中断当前批次（如 skill_expanded）
 
-        Args:
-            state: 会话状态（本方法当前未使用 state，保留参数供扩展）。
-            run_state: 当轮运行状态，包含 todo_replan_required、barrier_reason 等。
-
-        Returns:
-            "<query-overlay>...</query-overlay>" 字符串，或 ""（无覆盖信号时）。
+        这个层是最"轻"的，大多数轮次返回空字符串。
         """
         if not run_state.todo_replan_required and not run_state.barrier_reason:
             return ""
@@ -224,19 +239,7 @@ class PromptAssembler:
     def build_internal_runtime_view(
         self, state: SessionState, run_state: RunState
     ) -> dict[str, object]:
-        """构建内部运行时状态快照，用于调试和日志。
-
-        Args:
-            state: 会话状态。
-            run_state: 当轮运行状态。
-
-        Returns:
-            包含以下 key 的字典：
-            - invoked_skills: list[str] — 已激活 skill ID 列表
-            - todo_items: list[str] — todo 项的 active_form 列表
-            - read_file_state: dict — 已读文件状态映射
-            - barrier_reason: str | None — barrier 触发原因
-        """
+        """构建内部状态快照，用于调试和日志。不会发送给模型。"""
         return {
             "invoked_skills": list(state.invoked_skills.keys()),
             "todo_items": [item.active_form for item in state.todo_state.items],

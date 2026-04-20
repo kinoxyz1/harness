@@ -1,4 +1,25 @@
-"""Session-driven CLI entrypoint."""
+"""入口点 — 用户输入从这里进入系统。
+
+数据流总览：
+    用户输入 >>
+        → handle_input()
+            → SessionEngine.submit_user_message()
+                → QueryLoop.run()（think-act 主循环）
+                    → MessageViewBuilder.build()（组装模型输入）
+                    → ModelGateway.call_once()（调用 API）
+                    → ToolExecutorRuntime.execute_batch()（执行工具）
+                    → 回到循环顶部...
+                ← QueryResult（最终回复）
+        ← 显示给用户
+
+组件装配（main 函数）：
+    所有组件在这里一次性组装，依赖注入风格——每个组件不知道其他组件的存在，
+    只通过方法参数传递数据。Engine 是唯一的协调者。
+
+    AnthropicClient → ModelGateway → SessionEngine
+    ToolRegistry → ToolExecutorRuntime → SessionEngine
+    PolicyRunner(MaxTurnsPolicy, TodoPlanningPolicy) → SessionEngine
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,7 +49,12 @@ console = Console()
 
 
 def handle_input(raw: str, engine: SessionEngine) -> bool:
-    """Process one line of user input. Returns True to continue, False to quit."""
+    """处理一行用户输入。返回 True 继续，False 退出。
+
+    分流逻辑：
+    - /skills 命令 → 直接在 engine 层处理，不进 QueryLoop
+    - 普通文本 → 进入 QueryLoop 的完整 think-act 循环
+    """
     text = raw.strip()
     if not text:
         return True
@@ -44,18 +70,26 @@ def handle_input(raw: str, engine: SessionEngine) -> bool:
 
 
 def main() -> None:
+    # ── UI 层 ──────────────────────────────────────────────
     renderer = RichRenderer(console)
+
+    # ── 工具层 ─────────────────────────────────────────────
+    # ToolUseContext: 工具执行的运行时环境（工作目录、文件状态缓存等）
     tool_context = ToolUseContext(working_dir=".", max_turns=MAX_TURNS)
+
+    # ── 组装 Engine（所有组件的唯一协调者）──────────────────
+    # Engine 持有 SessionState，其他组件通过 Engine 间接共享状态
     engine = SessionEngine(
         model_gateway=ModelGateway(AnthropicClient()),
         tool_runtime=ToolExecutorRuntime(registry, tool_context, renderer=renderer),
         tool_context=tool_context,
         policy_runner=PolicyRunner([MaxTurnsPolicy(MAX_TURNS), TodoPlanningPolicy()]),
         recovery=RecoveryManager(),
-        tools=registry.schemas(),
+        tools=registry.schemas(),     # 工具的 JSON schema，传给 API 让模型知道可以调什么
         renderer=renderer,
     )
 
+    # ── REPL 主循环 ─────────────────────────────────────────
     console.print("[bold green]Agent Loop 已启动。[/bold green] 输入 [dim]exit[/dim] 或 [dim]quit[/dim] 退出。\n")
     while True:
         try:

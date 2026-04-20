@@ -1,3 +1,13 @@
+"""QueryLoop — Agent 核心主循环。
+
+每次用户输入触发一次 QueryLoop.run()，内部是 think-act 循环：
+模型思考 → 决定调用工具 → 执行工具 → 把结果喂回模型 → 再思考 → ... → 给出最终回复。
+
+退出循环的三条路径：
+1. 模型输出纯文本（无 tool_calls）→ 正常完成
+2. 工具调用轮次达到上限 → 强制终止
+3. 模型返回空响应且 recovery 也无法挽救 → 失败
+"""
 from __future__ import annotations
 
 from core.query.result import QueryResult, StopReason
@@ -6,8 +16,11 @@ from core.session.state import TodoItem
 from core.tools.runtime import ToolBatchResult, ToolCall
 
 
+# ─── 工具调用解析 ────────────────────────────────────────────────────────────
+
+
 def _parse_tool_calls(raw_calls: list) -> list[ToolCall]:
-    """将归一 tool_call dict 或 ToolCall 实例转为 ToolCall 列表。"""
+    """将模型返回的 tool_call（dict 或 ToolCall 实例）统一为 ToolCall 列表。"""
     calls: list[ToolCall] = []
     for i, tc in enumerate(raw_calls):
         if isinstance(tc, ToolCall):
@@ -25,8 +38,14 @@ def _parse_tool_calls(raw_calls: list) -> list[ToolCall]:
     return calls
 
 
+# ─── UI 展示辅助 ──────────────────────────────────────────────────────────────
+
+
 def _tool_fallback_fragment(call: ToolCall) -> str | None:
-    """从工具调用中生成包含具体信息的 fallback 文本。"""
+    """从工具调用参数中提取一行可读的操作摘要，用于在模型无文字输出时显示状态。
+
+    例如："读取 style-system.md"、"执行: python analyze.py"。
+    """
     args = call.args or {}
     name = call.name
 
@@ -55,6 +74,11 @@ def _tool_fallback_fragment(call: ToolCall) -> str | None:
 
 
 def _build_tool_fallback_status(tool_calls: list[ToolCall]) -> str | None:
+    """将一批工具调用拼成一段连贯的操作描述。
+
+    例如："先读取 data.csv；然后执行: python analyze.py。"
+    遇到 skill 工具时停止拼接（skill 展开后会重新评估，后续操作可能变化）。
+    """
     fragments: list[str] = []
     for call in tool_calls:
         fragment = _tool_fallback_fragment(call)
@@ -74,6 +98,9 @@ def _build_tool_fallback_status(tool_calls: list[ToolCall]) -> str | None:
     return "；".join(parts) + "。"
 
 
+# ─── Todo 展示辅助 ────────────────────────────────────────────────────────────
+
+
 def _clone_todo_items(items: list[TodoItem]) -> list[TodoItem]:
     return [
         TodoItem(
@@ -87,6 +114,7 @@ def _clone_todo_items(items: list[TodoItem]) -> list[TodoItem]:
 
 
 def _todo_write_succeeded(batch: ToolBatchResult) -> bool:
+    """检查工具批次中是否有 todo 写入成功。"""
     successes = batch.tool_successes or []
     return any(
         name == "todo" and idx < len(successes) and successes[idx]
@@ -95,6 +123,13 @@ def _todo_write_succeeded(batch: ToolBatchResult) -> bool:
 
 
 def _render_todo_state_update(renderer, session_state, state: RunState, batch: ToolBatchResult) -> None:
+    """工具批次执行后，根据 todo 变化更新 UI 展示。
+
+    三个分支：
+    1. todo 列表有变化（与上次展示不同）→ 刷新整个进度条
+    2. todo 列表没变但有 in_progress 项 → 显示当前项的简要状态
+    3. todo 列表已清空（全部完成）→ 显示完成摘要
+    """
     if renderer is None or not _todo_write_succeeded(batch):
         return
 
@@ -123,15 +158,28 @@ def _render_todo_state_update(renderer, session_state, state: RunState, batch: T
     state.last_displayed_todo_items = []
 
 
-def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
-    """将工具批次中的控制面信号应用到 RunState。
+# ─── 控制面信号处理 ──────────────────────────────────────────────────────────
 
-    处理三种信号：
-    - ContextPatch: 工具对 allowed_tools / model / effort 的覆盖请求
-    - Barrier: 工具要求停止当前批次（如 skill_expanded）
-    - Todo 写入成功: 重置 replan 计数器（除非同时有 skill_expanded barrier）
+
+def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
+    """将工具批次返回的控制面信号应用到 RunState。
+
+    工具可以通过 ToolResult 返回三种信号：
+
+    1. ContextPatch — 覆盖当前轮次的运行参数：
+       - allowed_tools: 限制后续可用的工具集合（只取交集，越用越窄）
+       - model_override: 切换模型
+       - effort_override: 调整推理深度
+
+    2. ExecutionBarrier — 要求停止当前工具批次，让模型重新评估：
+       - "skill_expanded": skill 工具加载了新 skill，模型需要重新规划
+
+    3. Todo 写入成功 — 重置 "多久没写 todo 了" 的计数器，
+       但如果同时有 skill_expanded barrier 则不重置（需要先 replan）。
     """
     skill_expanded_barrier = False
+
+    # 处理 ContextPatch
     for patch in batch.context_patches:
         if patch.allowed_tools is not None:
             state.allowed_tools_override = (
@@ -143,6 +191,8 @@ def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
             state.model_override = patch.model_override
         if patch.effort_override is not None:
             state.effort_override = patch.effort_override
+
+    # 处理 Barrier
     if batch.barrier is not None:
         state.barrier_reason = batch.barrier.reason
         if batch.barrier.reason == "skill_expanded":
@@ -150,6 +200,7 @@ def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
             state.todo_replan_required = True
             state.todo_replan_reason = "skill_expanded"
 
+    # 处理 Todo 写入成功
     todo_succeeded = False
     tool_successes = getattr(batch, "tool_successes", None) or []
     for idx, tool_name in enumerate(getattr(batch, "tool_names", [])):
@@ -164,7 +215,11 @@ def _apply_batch_control_plane(state: RunState, batch: ToolBatchResult) -> None:
 
 
 def _note_assistant_turn(state: RunState, model_resp) -> None:
-    """Track assistant turns that did not produce a todo write opportunity."""
+    """如果本轮模型没有调用 todo 工具，递增计数器。
+
+    当计数器达到阈值（默认 4），TodoPlanningPolicy 会注入
+    "计划可能已过时" 的 system-reminder，提醒模型刷新 todo。
+    """
     tool_calls = getattr(model_resp, "tool_calls", [])
     if not any(
         (call.get("name") if isinstance(call, dict) else getattr(call, "name", None)) == "todo"
@@ -173,16 +228,22 @@ def _note_assistant_turn(state: RunState, model_resp) -> None:
         state.assistant_turns_since_todo += 1
 
 
-class QueryLoop:
-    """管理一次 query run 的唯一主循环。
+# ─── 主循环 ──────────────────────────────────────────────────────────────────
 
-    循环流程：
-    1. 调用 policy_runner 注入前置消息
-    2. 通过 view_builder 构建 ModelInputView（组装 system + 截取 transcript）
-    3. 调用 model_gateway 发送请求（system 和 messages 分通道传递）
-    4. 若模型返回 tool_calls → 执行工具批次 → 应用控制面补丁 → 继续循环
-    5. 若模型返回最终文本 → 返回 QueryResult
-    6. 若模型返回空响应 → 交给 recovery 处理
+
+class QueryLoop:
+    """Agent 核心主循环：think → act → observe → think → ...
+
+    每次 run() 调用处理一个用户输入，内部可能经历多轮模型调用：
+    - 用户说"帮我分析数据" → 模型调用 read_csv → 工具返回数据 → 模型调用 python → ...
+    - 直到模型输出最终文本回复，或达到轮次上限。
+
+    外部组件职责：
+    - view_builder: 组装发送给模型的输入（system prompt + transcript slice）
+    - model_gateway: 执行 API 调用
+    - tool_runtime: 执行工具（并行/串行调度）
+    - policy_runner: 注入控制消息（todo 提醒、max_turns 强制终止等）
+    - recovery: 处理模型空响应等异常
     """
 
     def run(
@@ -219,10 +280,19 @@ class QueryLoop:
         state = RunState()
 
         while True:
+            # ── 步骤 1：策略注入 ──────────────────────────────────────
+            # policy_runner 可以在模型调用前注入消息，例如：
+            # - skill 刚展开时注入 "请刷新 todo" 提醒
+            # - 连续多轮未写 todo 时注入 "计划可能过时" 提醒
             before_messages = policy_runner.before_model_call(session_state, state)
             if before_messages:
                 store.extend(before_messages)
 
+            # ── 步骤 2：构建模型输入 ──────────────────────────────────
+            # view_builder 从 state 中组装：
+            # - system: 稳定指令 + 运行时上下文（skill/todo/文件状态）+ 单轮覆盖层
+            # - messages: 从 conversation_messages 中按预算截取的 transcript slice
+            # - tools: 根据 allowed_tools_override 过滤后的工具列表
             working_dir = getattr(tool_context, "working_dir", None) or "."
             view = view_builder.build(
                 session_state,
@@ -231,13 +301,20 @@ class QueryLoop:
                 working_dir=working_dir,
                 project_root=getattr(tool_context, "working_dir", None),
             )
+
+            # ── 步骤 3：调用模型 ─────────────────────────────────────
+            # max_turns 已触发时不再传 tools，迫使模型给出最终文本
             active_tools = None if state.stop_reason == "max_turns" else view.tools
             model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
+
+            # 显示 thinking 过程（蓝框）
             if renderer and getattr(model_resp, "reasoning", "").strip():
                 renderer.show_thinking("思考过程", model_resp.reasoning)
+
             state.last_model_response = model_resp
             store.append(model_resp.to_message())
 
+            # ── 分支 A：已达上限但模型仍想调工具 → 强制终止 ─────────
             if model_resp.tool_calls and state.stop_reason == "max_turns":
                 return QueryResult(
                     final_output="",
@@ -248,8 +325,11 @@ class QueryLoop:
                     files_modified=state.files_modified,
                 )
 
+            # ── 分支 B：模型要求调用工具 → 执行工具批次 ─────────────
             if model_resp.tool_calls:
                 parsed_calls = _parse_tool_calls(model_resp.tool_calls)
+
+                # UI 展示：如果有文字就显示文字，否则显示工具操作摘要
                 if renderer:
                     if model_resp.content.strip():
                         renderer.show_assistant(model_resp.content)
@@ -257,14 +337,18 @@ class QueryLoop:
                         fallback_status = _build_tool_fallback_status(parsed_calls)
                         if fallback_status:
                             renderer.show_status(fallback_status)
+
+                # 追踪连续未写 todo 的轮次
                 _note_assistant_turn(state, model_resp)
+
+                # 执行工具（readonly 并行，write 串行）
                 batch = tool_runtime.execute_batch(parsed_calls)
                 store.extend(batch.tool_results)
                 state.turn_count += 1
                 state.tool_calls_executed += len(parsed_calls)
                 state.files_modified.extend(batch.files_modified)
 
-                # Record skill events for model-initiated skill calls
+                # 记录模型主动调用的 skill 事件
                 skill_calls = [call for call in parsed_calls if call.name == "skill"]
                 for call in skill_calls:
                     from core.skills.models import SkillEvent
@@ -277,22 +361,29 @@ class QueryLoop:
                         )
                     )
 
-                # Apply context patches and barrier
+                # 应用控制面信号（ContextPatch、Barrier、Todo 状态）
                 _apply_batch_control_plane(state, batch)
                 _render_todo_state_update(renderer, session_state, state, batch)
 
+                # 策略后置注入（目前为空，预留扩展点）
                 after_messages = policy_runner.after_tool_batch(session_state, state, batch)
                 if after_messages:
                     store.extend(after_messages)
+
+                # 检查是否达到 max_turns
                 stop_reason = policy_runner.should_stop(session_state, state)
                 if stop_reason == "max_turns" and state.stop_reason != "max_turns":
                     state.stop_reason = "max_turns"
+                    # 注入一条 user 消息，让模型知道该收尾了
                     store.append({"role": "user", "content": "你已达到迭代安全上限。请基于当前已收集的信息给出最终回复。"})
                     continue
+
+                # barrier（如 skill_expanded）触发时跳过本轮后续逻辑，直接进入下一轮
                 if batch.barrier is not None:
                     continue
                 continue
 
+            # ── 分支 C：模型输出最终文本 → 正常完成 ────────────────
             if model_resp.has_final_text:
                 return QueryResult(
                     final_output=model_resp.content,
@@ -302,6 +393,8 @@ class QueryLoop:
                     files_modified=state.files_modified,
                 )
 
+            # ── 分支 D：模型返回空响应 → 交给 recovery 处理 ────────
+            # recovery 可能注入追问消息让模型重试，也可能判定为不可恢复
             decision = recovery.handle(model_resp, state)
             if decision.should_continue:
                 store.extend(decision.follow_up_messages)

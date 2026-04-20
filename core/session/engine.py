@@ -1,3 +1,15 @@
+"""会话引擎 — 连接"用户输入"和"QueryLoop 主循环"的协调者。
+
+你在数据流中的位置：
+    用户输入
+      → SessionEngine.submit_user_message()   ← 你在这里
+        → bootstrap()（首次调用时发现 skill）
+        → 追加 user 消息到 conversation_messages
+        → QueryLoop.run()（进入 think-act 循环）
+
+Engine 持有 SessionState（会话的所有可变状态），其他组件通过 Engine 获取状态引用。
+Bootstrap 是幂等的：多次调用只执行一次，且不向 transcript 写入任何消息。
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -78,6 +90,11 @@ class SessionEngine:
 
         幂等方法：多次调用只执行一次。不会向 conversation_messages 写入任何消息，
         stable prompt 和 environment 由 PromptAssembler 在每轮查询时实时渲染。
+
+        做了什么：
+        1. 扫描 .harness/skills/ 目录下的 SKILL.md 文件
+        2. 解析每个 skill 的 frontmatter（name、description、when-to-use）
+        3. 计算所有 skill 的 revision hash（用于 stable prompt 缓存 key）
         """
         if self._bootstrapped:
             return
@@ -93,6 +110,8 @@ class SessionEngine:
     def handle_command(self, raw: str) -> str:
         """处理 /skills 命令（list/show/use/off/reload）。
 
+        这些命令不进入 QueryLoop，直接操作 SessionState 中的 skill_catalog 和 invoked_skills。
+
         Args:
             raw: 完整的命令字符串，如 "/skills use analysis-report"。
 
@@ -103,11 +122,15 @@ class SessionEngine:
         result = execute_skills_command(raw, state=self._state, registry=self._skill_registry)
         return result.output
 
-    def submit_user_message(self, text: str):
+    def submit_user_message(self, text):
         """提交用户消息并执行查询循环。
 
-        自动调用 bootstrap()，将用户消息追加到 store，然后启动 QueryLoop。
-        QueryLoop 会通过 MessageViewBuilder 组装 ModelInputView 并调用模型。
+        完整流程：
+        1. bootstrap() — 首次调用时发现 skill（幂等）
+        2. 追加 user 消息到 conversation_messages
+        3. 启动 QueryLoop.run() — 进入 think-act 循环
+           QueryLoop 内部会反复调用 view_builder → model_gateway → tool_runtime
+           直到模型给出最终文本或达到轮次上限
 
         Args:
             text: 用户输入的文本。

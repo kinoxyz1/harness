@@ -1,3 +1,37 @@
+"""Skill 注册表 — 发现、加载和缓存 Skill 文件。
+
+你在数据流中的位置：
+    SessionEngine.bootstrap()
+      → SkillRegistry.discover(skills_dir)       ← 你在这里
+      → 扫描 .harness/skills/*/SKILL.md
+      → 解析 frontmatter（name、description、references）
+      → 填充 skill_catalog
+
+    后续当模型调用 skill 工具时：
+      → SkillRegistry.load(skill_id)
+      → 读取 SKILL.md 的 body 和 reference 文件
+      → 返回 SkillContent（完整指令 + 引用文件内容）
+
+Skill 文件结构：
+    .harness/skills/analysis-report/
+      ├── SKILL.md              # 必须有，包含 frontmatter + 指令体
+      ├── report-structure.md   # 可选引用文件
+      ├── style-system.md       # 可选引用文件
+      └── ...
+
+SKILL.md 格式：
+    ---
+    name: Analysis Report
+    description: 生成结构化分析报告...
+    when-to-use: 当用户需要分析数据并生成报告时
+    references:                    # 可选，显式声明引用文件
+      - path: report-structure.md
+        purpose: 报告结构规范
+    ---
+    （指令体：告诉模型如何执行这个 skill）
+
+如果 frontmatter 没有 references 字段，会自动发现目录下所有 .md 文件作为引用。
+"""
 from __future__ import annotations
 
 import os
@@ -9,6 +43,10 @@ from .models import SkillContent, SkillMeta, SkillReference
 
 
 def _parse_skill_markdown(path: Path) -> tuple[dict[str, Any], str]:
+    """解析 SKILL.md 的 frontmatter 和 body。
+
+    格式：YAML frontmatter（--- 包裹）+ Markdown body。
+    """
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
         raise ValueError(f"SKILL.md missing frontmatter: {path}")
@@ -23,6 +61,7 @@ def _parse_skill_markdown(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _digest_text(text: str) -> str:
+    """计算文本的 SHA256 摘要，用于 skill 内容变更检测。"""
     return sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -33,12 +72,12 @@ def _resolve_reference(
     raw_path: str,
     purpose: str | None,
 ) -> SkillReference:
+    """解析引用文件的路径，确保不逃逸 skill 目录。"""
     abs_path = (skill_dir / raw_path).resolve()
     try:
         abs_path.relative_to(skill_dir.resolve())
     except ValueError as exc:
         raise ValueError(f"reference escapes skill dir: {raw_path}") from exc
-    # Do NOT check is_file() here — existence is checked at load time
     prompt_path = os.path.relpath(abs_path, working_dir.resolve())
     return SkillReference(
         path=raw_path,
@@ -54,6 +93,7 @@ def _parse_references(
     skill_dir: Path,
     working_dir: Path,
 ) -> list[SkillReference]:
+    """解析 frontmatter 中的 references 字段。"""
     raw_refs = meta_dict.get("references") or []
     if not isinstance(raw_refs, list):
         raise ValueError("references must be a list")
@@ -102,6 +142,10 @@ def _auto_discover_refs(skill_dir: Path) -> dict[str, str]:
 
 
 def compute_skills_revision(catalog: dict[str, SkillMeta]) -> str:
+    """计算所有 skill 的 revision hash（基于 SKILL.md 的 mtime）。
+
+    用于 stable prompt 的缓存 key —— revision 不变就不需要重新渲染。
+    """
     lines: list[str] = []
     for skill_id in sorted(catalog):
         meta = catalog[skill_id]
@@ -111,11 +155,14 @@ def compute_skills_revision(catalog: dict[str, SkillMeta]) -> str:
 
 
 class SkillRegistry:
-    """Discover local SKILL.md files and load their content on demand.
+    """Skill 注册表：发现、加载和缓存 Skill。
 
-    Usage: call discover(skills_dir) to scan and catalog, then
-    load(skill_id) to read a skill's body and compute its digest.
-    Cache is invalidated on each discover() call.
+    两阶段设计：
+    1. discover()：扫描目录，解析 frontmatter，构建 skill_catalog（只有元信息）
+    2. load()：按需读取完整内容（body + references），结果缓存
+
+    分离的好处：bootstrap 时只需要元信息（name/description），
+    完整内容只在 skill 被激活时才加载，节省内存和 IO。
     """
 
     def __init__(self) -> None:
@@ -128,6 +175,12 @@ class SkillRegistry:
     def discover(
         self, skills_dir: Path, *, working_dir: Path | None = None
     ) -> dict[str, SkillMeta]:
+        """扫描目录下的 SKILL.md 文件，构建 skill 目录。
+
+        遍历 skills_dir 下的每个子目录，查找 SKILL.md，
+        解析 frontmatter 获取 name/description/references。
+        每次调用都会清空之前的 catalog 和 cache。
+        """
         self._catalog = {}
         self._cache = {}
         self.errors = {}
@@ -169,6 +222,12 @@ class SkillRegistry:
         return dict(self._catalog)
 
     def load(self, skill_id: str) -> SkillContent:
+        """加载 skill 的完整内容（body + references）。
+
+        首次调用时从磁盘读取，后续从缓存返回。
+        如果 frontmatter 声明了 references，只加载声明的文件；
+        否则自动发现目录下所有 .md 文件作为引用。
+        """
         if skill_id in self._cache:
             return self._cache[skill_id]
         if skill_id not in self._catalog:
