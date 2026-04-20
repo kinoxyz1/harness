@@ -56,6 +56,39 @@ class MessageViewBuilder:
             return len(str(content)[:6_000])
         return 0
 
+    def _message_char_cost(self, message: dict[str, Any]) -> int:
+        """估算消息的总字符开销，包含 reasoning 字段。"""
+        cost = self._content_char_cost(message.get("content", ""))
+        reasoning = message.get("reasoning", "")
+        if reasoning:
+            cost += len(reasoning)
+        return cost
+
+    def _strip_old_thinking(
+        self, messages: list[dict[str, Any]], *, keep_last: int = 2
+    ) -> list[dict[str, Any]]:
+        """清理旧 thinking 块，只保留最近 N 个 assistant 消息的 reasoning。
+
+        返回新列表（不修改原始 conversation_messages），
+        超出 keep_last 的 assistant 消息的 reasoning/reasoning_signature 被移除。
+        """
+        # 找到所有 assistant 消息的索引
+        assistant_indices = [
+            i for i, msg in enumerate(messages) if msg.get("role") == "assistant"
+        ]
+        # 需要保留 reasoning 的 assistant 索引集合（最后 keep_last 个）
+        keep_set = set(assistant_indices[-keep_last:]) if assistant_indices else set()
+
+        cleaned: list[dict[str, Any]] = []
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant" and i not in keep_set:
+                if msg.get("reasoning") or msg.get("reasoning_signature"):
+                    stripped = {k: v for k, v in msg.items() if k not in ("reasoning", "reasoning_signature")}
+                    cleaned.append(stripped)
+                    continue
+            cleaned.append(msg)
+        return cleaned
+
     def _find_matching_tool_use(self, messages: list[dict[str, Any]], *, tool_call_id: str, before_index: int) -> int | None:
         """向前查找生成某个 tool_result 的 assistant tool_use 消息。"""
         for idx in range(before_index - 1, -1, -1):
@@ -91,8 +124,7 @@ class MessageViewBuilder:
         used = 0
         for idx in range(len(messages) - 1, -1, -1):
             message = messages[idx]
-            content = message.get("content", "")
-            cost = self._content_char_cost(content)
+            cost = self._message_char_cost(message)
             if selected_indices and used + cost > char_budget:
                 continue
             selected_indices.append(idx)
@@ -148,6 +180,7 @@ class MessageViewBuilder:
         """
         budget = transcript_char_budget or 24_000
         transcript_slice = self._select_transcript_slice(state.conversation_messages, char_budget=budget)
+        transcript_slice = self._strip_old_thinking(transcript_slice, keep_last=2)
         system_parts = [
             prompt_assembler.build_stable_context(state, project_root=project_root),
             prompt_assembler.build_runtime_context(state, working_dir=working_dir),

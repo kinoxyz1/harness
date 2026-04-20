@@ -20,8 +20,9 @@ class ExecutionBarrier:
 
 
 def safe_path(path: str, working_dir: str) -> Path:
-    """解析路径并确保不逃逸工作目录。"""
-    return (Path(working_dir).resolve() / path).resolve()
+    """解析路径：展开 ~，绝对路径直接使用，相对路径基于工作目录解析。"""
+    expanded = Path(path).expanduser()
+    return (Path(working_dir).resolve() / expanded).resolve()
 
 
 @dataclass

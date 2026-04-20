@@ -138,7 +138,7 @@ def test_handle_command_reload(tmp_path: Path) -> None:
 
 
 def test_handle_command_use_respects_inline_skill_budget(tmp_path: Path) -> None:
-    big_body = "x" * 20_000
+    big_body = "x" * 250_000
     write_skill(tmp_path, "skill-a", "Skill A", "A", big_body)
     write_skill(tmp_path, "skill-b", "Skill B", "B", big_body)
 
@@ -168,7 +168,7 @@ def test_handle_command_use_repeat_records_latest_invocation(tmp_path: Path) -> 
 
 def test_handle_command_use_enforces_cumulative_budget_across_different_skills(tmp_path: Path) -> None:
     """Budget accumulates across different skills in state.invoked_skills."""
-    body = "x" * 7_000
+    body = "x" * 130_000
     write_skill(tmp_path, "skill-a", "Skill A", "A", body)
     write_skill(tmp_path, "skill-b", "Skill B", "B", body)
     write_skill(tmp_path, "skill-c", "Skill C", "C", body)
@@ -488,8 +488,9 @@ def test_active_skill_reference_index_reaches_model_view(tmp_path: Path) -> None
 
 def test_use_rejects_when_reference_chars_exceed_budget(tmp_path: Path) -> None:
     """Budget check must include reference body chars."""
-    # SKILL.md body = ~50 chars, reference file = 12000 chars
-    big_ref = "y" * 12_000
+    # Each skill: body ~50 chars + reference 260K chars = ~260K per skill
+    # Two skills = ~520K > 500K budget
+    big_ref = "y" * 260_000
     for i in range(2):
         write_skill_with_refs(
             tmp_path,

@@ -14,7 +14,7 @@ from typing import Any
 
 from rich.console import Console
 
-from ..shared.config import ENABLE_THINKING, MAX_TOKENS, MODEL
+from ..shared.config import MAX_TOKENS, MODEL, THINKING_MODE, THINKING_BUDGET
 from .factory import create_llm_client
 from .protocol import normalize_messages
 from ..shared.run_options import RunDisplayOptions
@@ -72,6 +72,25 @@ class AnthropicClient:
 
     def __init__(self) -> None:
         self._client = create_llm_client()
+        self._adaptive_supported: bool | None = None  # None = 未检测, True/False = 缓存结果
+
+    def _apply_thinking(self, params: dict[str, Any]) -> None:
+        """根据配置和模型能力设置 thinking 参数。
+
+        auto 模式：优先尝试 adaptive（模型自决定思考深度），不支持则 fallback。
+        enabled 模式：使用固定 budget_tokens。
+        disabled 模式：不设置 thinking。
+        """
+        if THINKING_MODE == "disabled":
+            return
+        if THINKING_MODE == "enabled":
+            params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+            return
+        # auto: 使用缓存或尝试 adaptive
+        if self._adaptive_supported is False:
+            params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+        else:
+            params["thinking"] = {"type": "adaptive"}
 
     def call(
         self,
@@ -84,7 +103,7 @@ class AnthropicClient:
         """执行一次 Anthropic API 调用。
 
         system 合并策略：将外部传入的 system 参数与 normalize_messages 从 messages
-        中提取的系统文本合并为 full_system，确保不会丢失任何系统级指令。
+        中提取的系统文本合并为 full_system，确保不会不会丢失任何系统级指令。
 
         Args:
             messages: 对话消息列表。
@@ -115,8 +134,7 @@ class AnthropicClient:
         }
         if tools:
             params["tools"] = tools
-        if ENABLE_THINKING:
-            params["thinking"] = {"type": "enabled", "budget_tokens": min(MAX_TOKENS, 10000)}
+        self._apply_thinking(params)
 
         result: dict[str, Any] = {}
         error: dict[str, Any] = {}
@@ -143,7 +161,39 @@ class AnthropicClient:
             sys.stdout.flush()
 
         if error.get("data"):
-            raise error["data"]
+            err = error["data"]
+            # adaptive 不支持时自动 fallback 到 enabled
+            if (
+                self._adaptive_supported is None
+                and isinstance(err, Exception)
+                and "adaptive" in str(err).lower()
+            ):
+                self._adaptive_supported = False
+                params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+                result.clear()
+                error.clear()
+
+                def do_retry() -> None:
+                    try:
+                        result["data"] = self._client.messages.create(**params)
+                    except Exception as e:
+                        error["data"] = e
+
+                retry_thread = threading.Thread(target=do_retry)
+                retry_thread.start()
+                while retry_thread.is_alive():
+                    elapsed = int(time.time() - start)
+                    if not display.quiet:
+                        sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
+                        sys.stdout.flush()
+                    retry_thread.join(timeout=1.0)
+                if error.get("data"):
+                    raise error["data"]
+            else:
+                raise err
+
+        if self._adaptive_supported is None:
+            self._adaptive_supported = True
 
         response = result["data"]
         elapsed = time.time() - start

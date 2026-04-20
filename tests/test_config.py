@@ -1,21 +1,21 @@
-"""测试配置层迁移：新环境变量读取、旧变量已移除。"""
-import os
+"""测试配置层：环境变量读取与默认值。"""
 import importlib
 import pytest
 
 
 @pytest.fixture(autouse=True)
 def _reload_config(monkeypatch):
-    """每个测试前重置 config 模块，确保读到最新环境变量。"""
-    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
-    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
-    monkeypatch.delenv("LLM_SHOW_THINKING", raising=False)
+    """每个测试前重置 config 模块，确保读到最新环境变量。
+
+    跳过 load_dotenv 以防止 .env 文件覆盖 monkeypatch 设置的环境变量。
+    """
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **kwargs: None)
+    for var in [
+        "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL",
+        "LLM_MAX_TOKENS", "LLM_THINKING_MODE", "LLM_THINKING_BUDGET",
+        "LLM_SHOW_THINKING", "BASH_TIMEOUT",
+    ]:
+        monkeypatch.delenv(var, raising=False)
     import core.shared.config as cfg
     importlib.reload(cfg)
     yield
@@ -49,18 +49,31 @@ def test_reads_base_url(monkeypatch):
     assert cfg.BASE_URL == "https://kimi.example.com/v1"
 
 
-def test_base_url_empty_by_default():
+def test_base_url_default():
     import core.shared.config as cfg
     importlib.reload(cfg)
     assert cfg.BASE_URL == "https://api.kimi.com/coding/"
 
 
+def test_thinking_mode_default():
+    import core.shared.config as cfg
+    importlib.reload(cfg)
+    assert cfg.THINKING_MODE == "auto"
+
+
+def test_thinking_mode_override(monkeypatch):
+    monkeypatch.setenv("LLM_THINKING_MODE", "disabled")
+    import core.shared.config as cfg
+    importlib.reload(cfg)
+    assert cfg.THINKING_MODE == "disabled"
+
+
 def test_preserves_existing_env_vars(monkeypatch):
     monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
-    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    monkeypatch.setenv("LLM_THINKING_MODE", "enabled")
     monkeypatch.setenv("BASH_TIMEOUT", "60")
     import core.shared.config as cfg
     importlib.reload(cfg)
     assert cfg.MAX_TOKENS == 4096
-    assert cfg.ENABLE_THINKING is False
+    assert cfg.THINKING_MODE == "enabled"
     assert cfg.BASH_TIMEOUT == 60

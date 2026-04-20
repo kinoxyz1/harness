@@ -78,6 +78,29 @@ def _parse_references(
     return refs
 
 
+def _auto_discover_refs(skill_dir: Path) -> dict[str, str]:
+    """自动发现 skill 目录下的所有 .md 文件（排除 SKILL.md）。
+
+    当 skill 的 frontmatter 未声明 references 时调用，
+    兼容从 GitHub 等来源获取的、不含 references 字段的 skill。
+    """
+    ref_bodies: dict[str, str] = {}
+    if not skill_dir.is_dir():
+        return ref_bodies
+    for entry in sorted(skill_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        if not entry.name.endswith(".md"):
+            continue
+        if entry.name == "SKILL.md":
+            continue
+        try:
+            ref_bodies[entry.name] = entry.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return ref_bodies
+
+
 def compute_skills_revision(catalog: dict[str, SkillMeta]) -> str:
     lines: list[str] = []
     for skill_id in sorted(catalog):
@@ -154,11 +177,14 @@ class SkillRegistry:
         _, body = _parse_skill_markdown(meta.skill_file)
 
         ref_bodies: dict[str, str] = {}
-        for ref in meta.references:
-            try:
-                ref_bodies[ref.prompt_path] = ref.abs_path.read_text(encoding="utf-8")
-            except Exception:
-                pass
+        if meta.references:
+            for ref in meta.references:
+                try:
+                    ref_bodies[ref.prompt_path] = ref.abs_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+        else:
+            ref_bodies = _auto_discover_refs(meta.skill_dir)
 
         content = SkillContent(
             meta=meta,

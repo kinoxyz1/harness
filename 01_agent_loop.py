@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.shared.config import MAX_TURNS
 from core.shared.env_loader import load_project_env
 
 load_project_env(Path(__file__).with_name(".env"))
@@ -44,12 +45,12 @@ def handle_input(raw: str, engine: SessionEngine) -> bool:
 
 def main() -> None:
     renderer = RichRenderer(console)
-    tool_context = ToolUseContext(working_dir=".", max_turns=20)
+    tool_context = ToolUseContext(working_dir=".", max_turns=MAX_TURNS)
     engine = SessionEngine(
         model_gateway=ModelGateway(AnthropicClient()),
         tool_runtime=ToolExecutorRuntime(registry, tool_context, renderer=renderer),
         tool_context=tool_context,
-        policy_runner=PolicyRunner([MaxTurnsPolicy(20), TodoPlanningPolicy()]),
+        policy_runner=PolicyRunner([MaxTurnsPolicy(MAX_TURNS), TodoPlanningPolicy()]),
         recovery=RecoveryManager(),
         tools=registry.schemas(),
         renderer=renderer,

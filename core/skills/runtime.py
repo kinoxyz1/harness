@@ -9,6 +9,9 @@ def build_skill_runtime_body(skill_id: str, content: SkillContent) -> str:
     生成的 XML 包含 skill 指令体和引用文件（如有），
     后续会存储到 InvokedSkillRecord.content 中供 PromptAssembler 读取。
 
+    遵循 Claude Code 的模式：注入 skill 目录路径，使模型可以用 Read 工具
+    按需读取 skill 目录下的其他文件。
+
     Args:
         skill_id: skill 标识符。
         content: 加载后的 skill 内容，包含 body、reference_bodies 等。
@@ -16,9 +19,11 @@ def build_skill_runtime_body(skill_id: str, content: SkillContent) -> str:
     Returns:
         完整的 <skill-runtime> XML 字符串。
     """
+    skill_dir = str(content.meta.skill_dir)
     lines = [
         "<skill-runtime>",
         f'  <skill id="{skill_id}" source="local-inline">',
+        f"    Base directory for this skill: {skill_dir}",
         "    <instruction>",
         content.body,
         "    </instruction>",
@@ -34,16 +39,16 @@ def build_skill_runtime_body(skill_id: str, content: SkillContent) -> str:
     return "\n".join(lines)
 
 
-def ensure_inline_skill_budget(*, state, new_content: str, max_chars: int = 24_000) -> None:
-    """检查 inline skill 字符预算，超出则抛出 ValueError。
+def ensure_inline_skill_budget(*, state, new_content: str, max_chars: int = 500_000) -> None:
+    """检查 inline skill 字符预算。
 
-    计算逻辑：累加 state.invoked_skills 中所有已有 record 的 content 长度，
-    加上即将新增的 new_content 长度，与 max_chars 比较。
+    大模型上下文通常为 200K tokens（约 800K 字符），skill 内容占比极小，
+    不应人为限制。默认预算设为 500K 字符，仅在极端情况下保护。
 
     Args:
         state: 会话状态，包含 invoked_skills。
         new_content: 即将新增的 skill 渲染内容。
-        max_chars: 最大允许的累计字符数，默认 24_000。
+        max_chars: 最大允许的累计字符数，默认 500_000。
 
     Raises:
         ValueError: 超出预算时。
