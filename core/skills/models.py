@@ -33,14 +33,6 @@ class SkillContent:
 
 
 @dataclass(slots=True)
-class ActiveSkillState:
-    skill_id: str
-    activated_at_message_index: int
-    source: str
-    content_digest: str
-
-
-@dataclass(slots=True)
 class InvokedSkillRecord:
     skill_id: str
     skill_path: str

@@ -11,7 +11,6 @@ from ..llm.anthropic_client import AnthropicClient
 from ..policy.base import PolicyRunner
 from ..policy.max_turns import MaxTurnsPolicy
 from ..query.recovery import RecoveryManager
-from ..ui.renderer import QuietRenderer
 from ..shared.run_options import RunDisplayOptions
 from .engine import SessionEngine
 from .view_builder import MessageViewBuilder

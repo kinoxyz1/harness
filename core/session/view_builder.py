@@ -64,8 +64,8 @@ class MessageViewBuilder:
     职责：
     1. 从 conversation_messages 中按字符预算截取 transcript slice
     2. 清理旧的 thinking 块
-    3. 调用 PromptAssembler 的三个接口组装 system 提示词
-    4. 根据 run_state 的 allowed_tools_override 过滤工具列表
+        3. 调用 PromptAssembler 的三个接口组装 system 提示词
+        4. 根据 run_state 的 allowed_tools_override 过滤工具列表
     """
 
     def __init__(self, tools: list[dict[str, Any]] | None = None):
@@ -115,6 +115,9 @@ class MessageViewBuilder:
         cleaned: list[dict[str, Any]] = []
         for i, msg in enumerate(messages):
             if msg.get("role") == "assistant" and i not in keep_set:
+                if msg.get("tool_calls"):
+                    cleaned.append(msg)
+                    continue
                 if msg.get("reasoning") or msg.get("reasoning_signature"):
                     stripped = {k: v for k, v in msg.items() if k not in ("reasoning", "reasoning_signature")}
                     cleaned.append(stripped)
@@ -204,7 +207,7 @@ class MessageViewBuilder:
         3. 组装 system prompt 三层：
            a. stable（缓存层）：框架指令 + skill 目录
            b. runtime（动态层）：环境信息 + 激活的 skill + todo + 文件状态
-           c. overlay（信号层）：replan 标记、barrier 原因
+           c. overlay（轻量钩子）：当前通常为空，预留未来扩展
         4. 过滤工具列表 — 根据 allowed_tools_override 限制可用工具
         """
         budget = transcript_char_budget or 24_000

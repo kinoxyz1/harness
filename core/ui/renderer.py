@@ -66,6 +66,10 @@ def _has_runtime_truncation_marker(output: str) -> bool:
     return "输出已截断，原始 " in output and "显示前 " in output
 
 
+def _has_read_file_continuation_marker(output: str) -> bool:
+    return "继续读取请使用 offset=" in output
+
+
 def _line_count_preview(output: str) -> int | None:
     count = 0
     for line in output.splitlines():
@@ -93,6 +97,8 @@ def _tool_result_summary(name: str, output: str) -> str | None:
             summary = f"已读取文件内容，预览 {line_count} 行"
             if _has_runtime_truncation_marker(output):
                 summary += "（runtime 截断，不是文件只有这些内容）"
+            elif _has_read_file_continuation_marker(output):
+                summary += "（文件较大，继续用 offset 读取）"
             return summary
 
     if name == "find":

@@ -23,11 +23,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.query.reducers import TransitionReason
+
 
 @dataclass(slots=True)
 class RecoveryDecision:
     should_continue: bool
     follow_up_messages: list[dict[str, str]] = field(default_factory=list)
+    transition_reason: TransitionReason | None = None
 
 
 class RecoveryManager:
@@ -37,11 +40,13 @@ class RecoveryManager:
             return RecoveryDecision(
                 should_continue=True,
                 follow_up_messages=[{"role": "user", "content": "请继续输出。"}],
+                transition_reason=TransitionReason.MAX_TOKENS_RECOVERY,
             )
         # 空响应恢复：模型什么都没说，引导它回复
         if not model_resp.has_final_text:
             return RecoveryDecision(
                 should_continue=True,
                 follow_up_messages=[{"role": "user", "content": "请直接给出最终答复。"}],
+                transition_reason=TransitionReason.EMPTY_RESPONSE_RETRY,
             )
         return RecoveryDecision(should_continue=False)

@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from ..context import ToolUseContext, ToolResult, safe_path
+from ..context import (
+    FileState,
+    RunUpdate,
+    RunUpdateKind,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolInvocationOutcome,
+    ToolOutcomeStatus,
+    ToolUseContext,
+    make_tool_message,
+    safe_path,
+)
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -85,18 +95,26 @@ PROMPT: str = """\
 # ─── Handler（执行逻辑）─────────────────────────────
 
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     """将内容写入文件。"""
     try:
         file_path = safe_path(args["path"], context.working_dir)
     except ValueError as e:
-        return ToolResult(output=str(e), success=False, error="path_escape")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="path_escape",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     content = args["content"]
     mode = args.get("mode", "write")
 
     if mode not in ("write", "append"):
-        return ToolResult(output=f"未知的写入模式: {mode}，请使用 'write' 或 'append'", success=False, error="invalid_mode")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="invalid_mode",
+            messages=[make_tool_message(context, f"未知的写入模式: {mode}，请使用 'write' 或 'append'")],
+        )
 
     # 创建父目录（如不存在）
     is_new = not file_path.exists()
@@ -112,18 +130,41 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         else:
             file_path.write_text(content, encoding="utf-8")
     except PermissionError:
-        return ToolResult(output=f"权限不足: {file_path}", success=False, error="permission_denied")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="permission_denied",
+            messages=[make_tool_message(context, f"权限不足: {file_path}")],
+        )
     except OSError as e:
-        return ToolResult(output=str(e), success=False, error="os_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="os_error",
+            messages=[make_tool_message(context, str(e))],
+        )
 
-    # 读取最终文件内容更新认知
     final_content = file_path.read_text(encoding="utf-8")
     abs_path = str(file_path)
-    context.update_file_state(abs_path, final_content)
-    context.mark_file_modified(abs_path)
+    file_state = FileState(content=final_content, timestamp=file_path.stat().st_mtime)
 
     lines = final_content.count("\n") + (1 if final_content and not final_content.endswith("\n") else 0)
     if is_append:
-        return ToolResult(output=f"已追加到 {file_path} (共 {lines} 行)", success=True)
-    action = "已创建" if is_new else "已覆盖"
-    return ToolResult(output=f"{action} {file_path} ({lines} 行)", success=True)
+        message = f"已追加到 {file_path} (共 {lines} 行)"
+    else:
+        action = "已创建" if is_new else "已覆盖"
+        message = f"{action} {file_path} ({lines} 行)"
+    return ToolInvocationOutcome(
+        status=ToolOutcomeStatus.SUCCESS,
+        messages=[make_tool_message(context, message)],
+        session_updates=[
+            SessionUpdate(
+                kind=SessionUpdateKind.UPSERT_FILE_STATE,
+                payload={"path": abs_path, "file_state": file_state},
+            )
+        ],
+        run_updates=[
+            RunUpdate(
+                kind=RunUpdateKind.MARK_FILE_MODIFIED,
+                payload={"path": abs_path},
+            )
+        ],
+    )

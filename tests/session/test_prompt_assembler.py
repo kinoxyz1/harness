@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.prompt.assembler import PromptAssembler
+from core.query.reducers import TransitionReason
 from core.query.state import RunState
 from core.session.state import SessionState, TodoItem, TodoState
 from core.skills import SkillMeta
@@ -273,44 +274,14 @@ def test_build_query_overlay_empty_when_no_flags(tmp_path: Path) -> None:
     assert result == ""
 
 
-def test_build_query_overlay_with_replan_required(tmp_path: Path) -> None:
+def test_build_query_overlay_is_empty_after_runtime_update_refactor(tmp_path: Path) -> None:
     state = make_state(tmp_path)
-    run_state = RunState(todo_replan_required=True, todo_replan_reason="tasks changed")
+    run_state = RunState(transition=TransitionReason.NEXT_TURN)
     assembler = PromptAssembler()
 
     result = assembler.build_query_overlay(state, run_state)
 
-    assert "<query-overlay>" in result
-    assert "<todo-replan>" in result
-    assert "tasks changed" in result
-
-
-def test_build_query_overlay_with_barrier_reason(tmp_path: Path) -> None:
-    state = make_state(tmp_path)
-    run_state = RunState(barrier_reason="awaiting user input")
-    assembler = PromptAssembler()
-
-    result = assembler.build_query_overlay(state, run_state)
-
-    assert "<query-overlay>" in result
-    assert "<barrier>" in result
-    assert "awaiting user input" in result
-
-
-def test_build_query_overlay_with_both(tmp_path: Path) -> None:
-    state = make_state(tmp_path)
-    run_state = RunState(
-        todo_replan_required=True,
-        todo_replan_reason="new task",
-        barrier_reason="blocked",
-    )
-    assembler = PromptAssembler()
-
-    result = assembler.build_query_overlay(state, run_state)
-
-    assert "<query-overlay>" in result
-    assert "<todo-replan>" in result
-    assert "<barrier>" in result
+    assert result == ""
 
 
 # ── build_internal_runtime_view ──────────────────────────────
@@ -325,10 +296,10 @@ def test_build_internal_runtime_view_basic(tmp_path: Path) -> None:
 
     assert "invoked_skills" in result
     assert "todo_items" in result
-    assert "barrier_reason" in result
+    assert "transition" in result
     assert result["invoked_skills"] == []
     assert result["todo_items"] == []
-    assert result["barrier_reason"] is None
+    assert result["transition"] is None
 
 
 def test_build_internal_runtime_view_with_data(tmp_path: Path) -> None:
@@ -343,14 +314,14 @@ def test_build_internal_runtime_view_with_data(tmp_path: Path) -> None:
     state.todo_state.items = [
         TodoItem(content="Task", active_form="Doing Task", status="in_progress"),
     ]
-    run_state = RunState(barrier_reason="blocked")
+    run_state = RunState(transition=TransitionReason.EMPTY_RESPONSE_RETRY)
     assembler = PromptAssembler()
 
     result = assembler.build_internal_runtime_view(state, run_state)
 
     assert result["invoked_skills"] == ["skill-a"]
     assert result["todo_items"] == ["Doing Task"]
-    assert result["barrier_reason"] == "blocked"
+    assert result["transition"] == "empty_response_retry"
 
 
 # ── build_stable_context (alias) ─────────────────────────────
@@ -386,6 +357,25 @@ def test_build_runtime_context_includes_recent_file_runtime(tmp_path: Path) -> N
     assert "alpha" in runtime
 
 
+def test_build_runtime_context_exposes_partial_file_range_metadata(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+    state.read_file_state[str(tmp_path / "a.txt")] = FileState(
+        content="alpha\nbeta\ngamma",
+        timestamp=10.0,
+        offset=101,
+        limit=50,
+        total_lines=725,
+    )
+    assembler = PromptAssembler()
+
+    runtime = assembler.build_runtime_context(state, working_dir=str(tmp_path))
+
+    assert 'full_read="false"' in runtime
+    assert 'start_line="101"' in runtime
+    assert 'end_line="150"' in runtime
+    assert 'total_lines="725"' in runtime
+
+
 def test_build_runtime_context_omits_file_runtime_when_empty(tmp_path: Path) -> None:
     state = make_state(tmp_path)
     assembler = PromptAssembler()
@@ -406,11 +396,11 @@ def test_build_internal_runtime_view_exposes_read_file_state(tmp_path: Path) -> 
     state.todo_state = TodoState(
         items=[TodoItem(content="Draft", active_form="Drafting", status="in_progress")]
     )
-    run_state = RunState(barrier_reason="skill_expanded")
+    run_state = RunState(transition=TransitionReason.MAX_TOKENS_RECOVERY)
     assembler = PromptAssembler()
 
     internal = assembler.build_internal_runtime_view(state, run_state)
 
     assert str(tmp_path / "a.txt") in internal["read_file_state"]
     assert internal["todo_items"] == ["Drafting"]
-    assert internal["barrier_reason"] == "skill_expanded"
+    assert internal["transition"] == "max_tokens_recovery"

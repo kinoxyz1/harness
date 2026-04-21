@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from core.llm.protocol import normalize_messages
 from core.prompt.assembler import PromptAssembler
 from core.query.state import RunState
 from core.session.state import SessionState
@@ -107,3 +108,59 @@ def test_build_keeps_tool_use_with_trailing_tool_result_when_budget_is_tight(tmp
     assert [message["role"] for message in view.messages] == ["assistant", "tool"]
     assert view.messages[0]["tool_calls"][0]["id"] == "toolu_read_1"
     assert view.messages[1]["tool_call_id"] == "toolu_read_1"
+
+
+def test_build_preserves_reasoning_for_older_assistant_tool_call_messages(tmp_path: Path) -> None:
+    state = SessionState(
+        conversation_messages=[
+            {"role": "user", "content": "Make slides"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "toolu_skill", "name": "skill", "args": {"skill": "ppt-master"}}],
+                "reasoning": "Need to load the skill first.",
+                "reasoning_signature": "sig-skill",
+            },
+            {"role": "tool", "tool_call_id": "toolu_skill", "content": "skill ok"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "toolu_todo", "name": "todo", "args": {"items": []}}],
+                "reasoning": "Need a plan before proceeding.",
+                "reasoning_signature": "sig-todo",
+            },
+            {"role": "tool", "tool_call_id": "toolu_todo", "content": "todo ok"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "toolu_read", "name": "read_file", "args": {"path": "slides.md"}}],
+                "reasoning": "Read the source document next.",
+                "reasoning_signature": "sig-read",
+            },
+            {"role": "tool", "tool_call_id": "toolu_read", "content": "read ok"},
+        ],
+    )
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+    )
+    _, normalized = normalize_messages(view.messages)
+
+    assistant_tool_messages = [
+        message
+        for message in normalized
+        if message["role"] == "assistant"
+    ]
+    first_tool_message_blocks = assistant_tool_messages[0]["content"]
+
+    assert first_tool_message_blocks[0] == {
+        "type": "thinking",
+        "thinking": "Need to load the skill first.",
+        "signature": "sig-skill",
+    }

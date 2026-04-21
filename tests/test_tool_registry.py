@@ -1,6 +1,7 @@
 """测试工具注册表迁移：Anthropic schema 形状、名称提取、filtered。"""
 import pytest
-from core.tools import registry
+from core.tools import ToolRegistry, registry
+from core.tools.context import ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext
 
 
 class TestSchemaShape:
@@ -45,3 +46,48 @@ class TestFiltered:
     def test_filtered_empty(self):
         sub = registry.filtered(set())
         assert sub.schemas() == []
+
+
+class _EchoTool:
+    SCHEMA = {
+        "name": "echo",
+        "description": "echo",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+    }
+    READONLY = True
+    ANNOTATIONS = {"readonly": True, "destructive": False, "idempotent": True, "concurrency_safe": True}
+
+    @staticmethod
+    def handle(args, context):
+        return ToolInvocationOutcome(status=ToolOutcomeStatus.SUCCESS)
+
+
+def test_execute_unknown_tool_returns_failure_outcome(tmp_path) -> None:
+    reg = ToolRegistry()
+    ctx = ToolUseContext(working_dir=str(tmp_path), max_turns=5)
+    ctx._set_call_identity(name="missing", call_id="toolu_missing", turn=1)
+
+    outcome = reg.execute("missing", {}, ctx)
+
+    assert isinstance(outcome, ToolInvocationOutcome)
+    assert outcome.status == ToolOutcomeStatus.FAILURE
+    assert outcome.error == "not_found"
+
+
+def test_execute_missing_required_params_returns_failure_outcome(tmp_path) -> None:
+    reg = ToolRegistry()
+    reg.register(_EchoTool)
+    ctx = ToolUseContext(working_dir=str(tmp_path), max_turns=5)
+    ctx._set_call_identity(name="echo", call_id="toolu_echo", turn=1)
+
+    outcome = reg.execute("echo", {}, ctx)
+
+    assert isinstance(outcome, ToolInvocationOutcome)
+    assert outcome.status == ToolOutcomeStatus.FAILURE
+    assert outcome.error == "missing_params"

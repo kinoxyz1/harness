@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from core.policy.base import PolicyRunner
 from core.policy.todo_tracking import TodoPlanningPolicy
 from core.query.loop import QueryLoop
+from core.query.reducers import TransitionReason
 from core.query.result import StopReason
 from core.llm.response import ModelResponse
 from core.session.state import SessionState
@@ -62,17 +63,15 @@ class FakeModelGatewayWithToolTurn:
 
 
 class FakeToolRuntime:
-    def execute_batch(self, tool_calls):
+    def execute_batch(self, tool_calls, *, run_state, apply_session_update, apply_run_update):
         return ToolBatchResult(
-            tool_results=[
+            messages=[
                 {"role": "tool", "tool_call_id": "toolu_1", "content": "ok"},
             ],
-            files_modified=[],
             tool_names=["read_file"],
-            injected_messages=[],
-            context_patches=[],
-            barrier=None,
-            tool_successes=[True],
+            tool_statuses=[],
+            session_updates=[],
+            run_updates=[],
         )
 
 
@@ -156,3 +155,25 @@ def test_query_loop_renders_assistant_content_when_tool_calls_are_present() -> N
 
     assert renderer.assistant_calls == ["我先读取配置文件。"]
     assert result.stop_reason == StopReason.COMPLETED
+
+
+def test_query_loop_marks_next_turn_after_tool_batch() -> None:
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=object(),
+        model_gateway=FakeModelGatewayWithToolTurn(),
+        tool_runtime=FakeToolRuntime(),
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    assert result.turns_used == 1
+    assert session_state.conversation_messages[-2]["role"] == "tool"
+    assert session_state.conversation_messages[-2]["content"] == "ok"

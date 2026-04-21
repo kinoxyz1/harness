@@ -7,14 +7,6 @@ from core.skills import SkillRegistry, compute_skills_revision
 from core.skills.models import SkillEvent
 from core.skills.runtime import apply_skill_invocation
 
-MAX_ACTIVE_SKILLS = 3  # deprecated compatibility constant
-MAX_TOTAL_SKILL_CHARS = 24000  # deprecated compatibility constant
-
-
-def _skill_total_chars(content) -> int:  # deprecated compatibility helper
-    return len(content.body) + sum(len(v) for v in content.reference_bodies.values())
-
-
 @dataclass(slots=True)
 class CommandResult:
     handled: bool

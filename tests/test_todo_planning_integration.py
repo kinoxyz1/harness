@@ -103,6 +103,7 @@ def test_analysis_report_todo_preserves_skill_workflow_labels(tmp_path: Path) ->
 
     assert any(item.workflow_ref == "2.5" for item in engine.state.todo_state.items)
     assert len(engine.state.todo_state.items) == 5
+    assert engine.state.todo_state.last_write_turn == 1
 
 
 def test_stale_reminder_does_not_fire_during_normal_two_step_scoping(tmp_path: Path) -> None:
@@ -166,3 +167,19 @@ def test_stale_reminder_fires_after_four_non_todo_turns(tmp_path: Path) -> None:
         for message in engine.state.conversation_messages
         if message["role"] == "user"
     )
+
+
+def test_skill_invocation_records_the_current_query_turn(tmp_path: Path) -> None:
+    write_analysis_report_fixture(tmp_path)
+    engine = make_engine_with_stubbed_model(
+        tmp_path,
+        responses=[
+            response_with_tool("toolu_read_1", "read_file", {"path": "a.txt"}),
+            response_with_tool("toolu_skill", "skill", {"skill": "analysis-report"}),
+            response_with_text("final"),
+        ],
+    )
+
+    engine.submit_user_message("Generate the analysis report")
+
+    assert engine.state.invoked_skills["analysis-report"].invoked_at_turn == 1

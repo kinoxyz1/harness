@@ -1,28 +1,4 @@
-"""提示词组装器 — 构建 system prompt 的三层结构。
-
-你在数据流中的位置：
-    MessageViewBuilder.build()
-      → prompt_assembler.build_stable()        ← 你在这里
-      → prompt_assembler.build_runtime()
-      → prompt_assembler.build_overlay()
-    → 拼接为完整的 system prompt
-
-三层设计（稳定性递减）：
-    1. stable（缓存层）：框架指令 + skill 目录
-       - 内容在 skill 不变时完全不变，可以通过 cache key 命中
-       - cache key = skills_revision + system_context sha256
-
-    2. runtime（动态层）：环境 + 激活的 skill + todo + 文件状态
-       - 每轮都重新渲染，因为 skill 激活状态、todo 进度、文件缓存都会变
-       - 包裹在 <runtime-context> XML 标签中
-
-    3. overlay（信号层）：replan 标记、barrier 原因
-       - 仅在有控制面信号时才生成
-       - 例如 skill 刚展开时注入 <todo-replan>skill_expanded</todo-replan>
-
-核心原则：所有 prompt 内容从 state 实时渲染，不依赖 transcript。
-这样即使 transcript 被截断，模型仍能看到完整的 skill 指令和 todo 状态。
-"""
+"""提示词组装器 — 构建 system prompt 的稳定层、运行时层和轻量 overlay 钩子。"""
 from __future__ import annotations
 
 import hashlib
@@ -35,9 +11,7 @@ from core.query.state import RunState
 from core.session.state import SessionState, TodoItem
 
 if TYPE_CHECKING:
-    from core.skills.models import InvokedSkillRecord, SkillMeta
     from core.skills.registry import SkillRegistry
-    from core.tools.context import FileState
 
 
 def _stable_cache_key(state: SessionState, *, project_root: str | None = None) -> str:
@@ -112,8 +86,21 @@ def _render_file_runtime(read_file_state: dict[str, Any], *, char_budget: int) -
         state = value
         excerpt = state.content[:400] if hasattr(state, "content") else str(value)[:400]
         is_full = state.is_full_read if hasattr(state, "is_full_read") else True
+        attrs = [
+            f'path="{Path(path).name}"',
+            f'full_read="{str(is_full).lower()}"',
+        ]
+        start_line = getattr(state, "offset", None)
+        line_limit = getattr(state, "limit", None)
+        total_lines = getattr(state, "total_lines", None)
+        if start_line is not None:
+            attrs.append(f'start_line="{start_line}"')
+        if start_line is not None and line_limit is not None:
+            attrs.append(f'end_line="{start_line + line_limit - 1}"')
+        if total_lines is not None:
+            attrs.append(f'total_lines="{total_lines}"')
         block = [
-            f'  <file path="{Path(path).name}" full_read="{str(is_full).lower()}">',
+            f"  <file {' '.join(attrs)}>",
             excerpt,
             "  </file>",
         ]
@@ -217,24 +204,11 @@ class PromptAssembler:
         return f"<runtime-context>\n{body}\n</runtime-context>"
 
     def build_query_overlay(self, state: SessionState, run_state: RunState) -> str:
-        """构建单轮覆盖信号（第 3 层）。
+        """构建单轮 overlay。
 
-        仅在有控制面信号时生成：
-        - <todo-replan>: skill 刚展开，需要模型重新规划 todo
-        - <barrier>: 工具要求中断当前批次（如 skill_expanded）
-
-        这个层是最"轻"的，大多数轮次返回空字符串。
+        当前重构后 overlay 预留为空钩子，未来再承载 compact / memory 等新增信号。
         """
-        if not run_state.todo_replan_required and not run_state.barrier_reason:
-            return ""
-        parts: list[str] = ["<query-overlay>"]
-        if run_state.todo_replan_required:
-            reason = run_state.todo_replan_reason or ""
-            parts.append(f"<todo-replan>{reason}</todo-replan>")
-        if run_state.barrier_reason:
-            parts.append(f"<barrier>{run_state.barrier_reason}</barrier>")
-        parts.append("</query-overlay>")
-        return "\n".join(parts)
+        return ""
 
     def build_internal_runtime_view(
         self, state: SessionState, run_state: RunState
@@ -244,7 +218,7 @@ class PromptAssembler:
             "invoked_skills": list(state.invoked_skills.keys()),
             "todo_items": [item.active_form for item in state.todo_state.items],
             "read_file_state": dict(state.read_file_state),
-            "barrier_reason": run_state.barrier_reason,
+            "transition": run_state.transition.value if run_state.transition is not None else None,
         }
 
     def build_stable_context(

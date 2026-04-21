@@ -5,7 +5,7 @@ import subprocess
 from typing import Any
 
 from ...shared.config import BASH_TIMEOUT
-from ..context import ToolUseContext, ToolResult
+from ..context import ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext, make_tool_message
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -94,21 +94,29 @@ def _extract_command_name(command: str) -> str:
 
 # ─── Handler（执行逻辑）─────────────────────────────
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-    """执行 bash 命令，返回 ToolResult。"""
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
+    """执行 bash 命令，返回结构化 outcome。"""
     command = args["command"]
 
     cmd_name = _extract_command_name(command)
 
     # 安全检查：黑名单
     if cmd_name in BLOCKED_COMMANDS:
-        return ToolResult(output="Command blocked for safety.", success=False, error="blocked")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.BLOCKED,
+            error="blocked",
+            messages=[make_tool_message(context, "Command blocked for safety.")],
+        )
 
     # 安全检查：需确认
     if cmd_name in CONFIRM_COMMANDS:
         answer = input(f"\033[31m⚠ Command '{command}' looks dangerous. Run anyway? [y/N]: \n \033[0m")
         if answer.strip().lower() not in ("y", "yes"):
-            return ToolResult(output="Command cancelled by user.", success=False, error="cancelled")
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.CANCELLED,
+                error="cancelled",
+                messages=[make_tool_message(context, "Command cancelled by user.")],
+            )
 
     # 执行
     try:
@@ -120,8 +128,19 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
             timeout=BASH_TIMEOUT,
         )
         out = (r.stdout + r.stderr).strip()
-        return ToolResult(output=out if out else "(no output)", success=True)
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.SUCCESS,
+            messages=[make_tool_message(context, out if out else "(no output)")],
+        )
     except subprocess.TimeoutExpired:
-        return ToolResult(output=f"Timeout ({BASH_TIMEOUT}s)", success=False, error="timeout")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="timeout",
+            messages=[make_tool_message(context, f"Timeout ({BASH_TIMEOUT}s)")],
+        )
     except (FileNotFoundError, OSError) as e:
-        return ToolResult(output=str(e), success=False, error="os_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="os_error",
+            messages=[make_tool_message(context, str(e))],
+        )

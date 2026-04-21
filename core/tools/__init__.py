@@ -4,18 +4,35 @@ import importlib
 import pathlib
 from typing import Any, Callable
 
-from .context import FileState, ToolResult, ToolUseContext, safe_path
+from .context import (
+    FileState,
+    RunUpdate,
+    RunUpdateKind,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolInvocationOutcome,
+    ToolOutcomeStatus,
+    ToolUseContext,
+    make_tool_message,
+    safe_path,
+)
 from .runtime import ToolCall, ToolExecutorRuntime
 
 
 __all__ = [
     "FileState",
+    "RunUpdate",
+    "RunUpdateKind",
+    "SessionUpdate",
+    "SessionUpdateKind",
     "ToolCall",
     "ToolExecutorRuntime",
-    "ToolResult",
+    "ToolInvocationOutcome",
+    "ToolOutcomeStatus",
     "ToolRegistry",
     "ToolUseContext",
     "auto_discover",
+    "make_tool_message",
     "registry",
     "safe_path",
 ]
@@ -76,19 +93,23 @@ class ToolRegistry:
                     new_reg._required_params[name] = self._required_params[name]
         return new_reg
 
-    def execute(self, name: str, args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-        """查表 → 验证参数 → 执行 → 返回 ToolResult。"""
+    def execute(self, name: str, args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
+        """查表 → 验证参数 → 执行 → 返回 ToolInvocationOutcome。"""
         handler = self._handlers.get(name)
         if not handler:
-            return ToolResult(output=f"Unknown tool '{name}'", success=False, error="not_found")
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.FAILURE,
+                error="not_found",
+                messages=[make_tool_message(context, f"Unknown tool '{name}'")],
+            )
 
         required = self._required_params.get(name, [])
         missing = [p for p in required if p not in args]
         if missing:
-            return ToolResult(
-                output=f"Missing required parameters: {', '.join(missing)}",
-                success=False,
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.FAILURE,
                 error="missing_params",
+                messages=[make_tool_message(context, f"Missing required parameters: {', '.join(missing)}")],
             )
 
         return handler(args, context)

@@ -8,6 +8,13 @@ from core.query.result import StopReason
 from core.session.state import SessionState, TodoItem, TodoState
 from core.session.store import SessionStore
 from core.session.view_builder import ModelInputView
+from core.tools.context import (
+    RunUpdate,
+    RunUpdateKind,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolOutcomeStatus,
+)
 from core.tools.runtime import ToolBatchResult
 
 
@@ -53,16 +60,14 @@ class FakeModelGateway:
 
 def _success_batch(*tool_names: str) -> ToolBatchResult:
     return ToolBatchResult(
-        tool_results=[
+        messages=[
             {"role": "tool", "tool_call_id": f"tool_{idx}", "content": f"{name} ok"}
             for idx, name in enumerate(tool_names)
         ],
-        files_modified=[],
         tool_names=list(tool_names),
-        injected_messages=[],
-        context_patches=[],
-        barrier=None,
-        tool_successes=[True for _ in tool_names],
+        tool_statuses=[ToolOutcomeStatus.SUCCESS for _ in tool_names],
+        session_updates=[],
+        run_updates=[],
     )
 
 
@@ -70,8 +75,15 @@ class FakeToolRuntime:
     def __init__(self, batches: list[ToolBatchResult]) -> None:
         self._batches = list(batches)
 
-    def execute_batch(self, tool_calls):
+    def execute_batch(self, tool_calls, *, run_state, apply_session_update, apply_run_update):
         return self._batches.pop(0)
+
+
+def _apply_batch_updates(batch: ToolBatchResult, run_state, apply_session_update, apply_run_update) -> None:
+    for update in batch.run_updates:
+        apply_run_update(run_state, update)
+    for update in batch.session_updates:
+        apply_session_update(update)
 
 
 class FakePolicyRunner:
@@ -157,7 +169,7 @@ def test_query_loop_shows_ui_only_fallback_for_empty_tool_turn() -> None:
         renderer=renderer,
     )
 
-    fallback = "先加载 analysis-report skill，再重新评估下一步。"
+    fallback = "先加载 analysis-report skill；然后更新计划；然后读取 README.md。"
 
     assert result.stop_reason == StopReason.COMPLETED
     assert renderer.assistant_calls == []
@@ -206,7 +218,7 @@ def test_query_loop_composes_fallback_for_three_tools() -> None:
     assert renderer.status_calls == ["先执行: ls；然后搜索: QueryLoop；然后写入 tmp.txt。"]
 
 
-def test_query_loop_truncates_fallback_after_skill_barrier() -> None:
+def test_query_loop_composes_fallback_across_skill_and_following_tools() -> None:
     session_state = SessionState(conversation_messages=[])
     store = SessionStore(session_state)
     renderer = FakeRenderer()
@@ -240,7 +252,7 @@ def test_query_loop_truncates_fallback_after_skill_barrier() -> None:
     )
 
     assert result.stop_reason == StopReason.COMPLETED
-    assert renderer.status_calls == ["先读取 README.md；然后加载 analysis-report skill，再重新评估下一步。"]
+    assert renderer.status_calls == ["先读取 README.md；然后加载 analysis-report skill；然后更新计划。"]
 
 
 def test_query_loop_composes_fallback_for_single_tool() -> None:
@@ -287,25 +299,36 @@ def test_query_loop_renders_full_todo_plan_once_then_current_focus() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def execute_batch(self, tool_calls):
+        def execute_batch(self, tool_calls, *, run_state, apply_session_update, apply_run_update):
             self.calls += 1
-            session_state.todo_state = TodoState(
-                items=[
-                    TodoItem(
-                        content="读取并解析 CSV 数据",
-                        active_form="读取并解析 CSV 数据",
-                        status="in_progress",
-                        workflow_ref="1",
-                    ),
-                    TodoItem(
-                        content="进行信息提取与模式发现",
-                        active_form="进行信息提取与模式发现",
-                        status="pending",
-                        workflow_ref="2",
-                    ),
-                ]
+            items = [
+                TodoItem(
+                    content="读取并解析 CSV 数据",
+                    active_form="读取并解析 CSV 数据",
+                    status="in_progress",
+                    workflow_ref="1",
+                ),
+                TodoItem(
+                    content="进行信息提取与模式发现",
+                    active_form="进行信息提取与模式发现",
+                    status="pending",
+                    workflow_ref="2",
+                ),
+            ]
+            batch = ToolBatchResult(
+                messages=[{"role": "tool", "tool_call_id": "tool_0", "content": "todo ok"}],
+                tool_names=["todo"],
+                tool_statuses=[ToolOutcomeStatus.SUCCESS],
+                session_updates=[
+                    SessionUpdate(
+                        kind=SessionUpdateKind.SET_TODO_ITEMS,
+                        payload={"items": items, "last_write_turn": self.calls},
+                    )
+                ],
+                run_updates=[RunUpdate(kind=RunUpdateKind.RESET_TODO_TURN_COUNTER, payload={})],
             )
-            return _success_batch("todo")
+            _apply_batch_updates(batch, run_state, apply_session_update, apply_run_update)
+            return batch
 
     gateway = FakeModelGateway(
         responses=[
@@ -351,19 +374,29 @@ def test_query_loop_renders_completion_summary_when_todo_plan_clears() -> None:
     renderer = FakeRenderer()
 
     class CompletingTodoRuntime:
-        def execute_batch(self, tool_calls):
-            session_state.todo_state = TodoState(
-                items=[],
-                last_completed_items=[
-                    TodoItem(
-                        content="验证报告完整性",
-                        active_form="验证报告完整性",
-                        status="completed",
-                        workflow_ref="4",
+        def execute_batch(self, tool_calls, *, run_state, apply_session_update, apply_run_update):
+            items = [
+                TodoItem(
+                    content="验证报告完整性",
+                    active_form="验证报告完整性",
+                    status="completed",
+                    workflow_ref="4",
+                )
+            ]
+            batch = ToolBatchResult(
+                messages=[{"role": "tool", "tool_call_id": "tool_0", "content": "todo ok"}],
+                tool_names=["todo"],
+                tool_statuses=[ToolOutcomeStatus.SUCCESS],
+                session_updates=[
+                    SessionUpdate(
+                        kind=SessionUpdateKind.SET_TODO_ITEMS,
+                        payload={"items": items, "last_write_turn": 1},
                     )
                 ],
+                run_updates=[RunUpdate(kind=RunUpdateKind.RESET_TODO_TURN_COUNTER, payload={})],
             )
-            return _success_batch("todo")
+            _apply_batch_updates(batch, run_state, apply_session_update, apply_run_update)
+            return batch
 
     gateway = FakeModelGateway(
         responses=[
@@ -421,23 +454,34 @@ def test_query_loop_renders_full_plan_again_after_clear_without_completion_snaps
         def __init__(self) -> None:
             self.calls = 0
 
-        def execute_batch(self, tool_calls):
+        def execute_batch(self, tool_calls, *, run_state, apply_session_update, apply_run_update):
             self.calls += 1
             if self.calls == 2:
-                session_state.todo_state = TodoState(items=[], last_completed_items=[])
+                items: list[TodoItem] = []
             else:
-                session_state.todo_state = TodoState(
-                    items=[
-                        TodoItem(
-                            content=item.content,
-                            active_form=item.active_form,
-                            status=item.status,
-                            workflow_ref=item.workflow_ref,
-                        )
-                        for item in plan_items
-                    ]
-                )
-            return _success_batch("todo")
+                items = [
+                    TodoItem(
+                        content=item.content,
+                        active_form=item.active_form,
+                        status=item.status,
+                        workflow_ref=item.workflow_ref,
+                    )
+                    for item in plan_items
+                ]
+            batch = ToolBatchResult(
+                messages=[{"role": "tool", "tool_call_id": "tool_0", "content": "todo ok"}],
+                tool_names=["todo"],
+                tool_statuses=[ToolOutcomeStatus.SUCCESS],
+                session_updates=[
+                    SessionUpdate(
+                        kind=SessionUpdateKind.SET_TODO_ITEMS,
+                        payload={"items": items, "last_write_turn": self.calls},
+                    )
+                ],
+                run_updates=[RunUpdate(kind=RunUpdateKind.RESET_TODO_TURN_COUNTER, payload={})],
+            )
+            _apply_batch_updates(batch, run_state, apply_session_update, apply_run_update)
+            return batch
 
     gateway = FakeModelGateway(
         responses=[

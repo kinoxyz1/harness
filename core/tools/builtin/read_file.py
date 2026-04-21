@@ -1,9 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from ..context import FileState, ToolUseContext, ToolResult, safe_path
+from ...shared.config import MAX_OUTPUT_CHARS
+from ..context import (
+    FileState,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolInvocationOutcome,
+    ToolOutcomeStatus,
+    ToolUseContext,
+    make_tool_message,
+    safe_path,
+)
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -85,33 +94,104 @@ PROMPT: str = """\
 # ─── 内部逻辑 ───────────────────────────────────────
 
 MAX_LINES = 2000
+READ_FILE_OUTPUT_CHAR_BUDGET = min(MAX_OUTPUT_CHARS, 20_000)
+
+
+def _continuation_notice(start_line: int, end_line: int, total_lines: int) -> str:
+    return (
+        f"\n\n(文件较大，已显示第 {start_line}-{end_line} 行，共 {total_lines} 行；"
+        f"继续读取请使用 offset={end_line + 1})"
+    )
+
+
+def _render_chunk_within_budget(
+    lines: list[str],
+    *,
+    start: int,
+    end: int,
+    total_lines: int,
+) -> tuple[str, int]:
+    actual_end = end
+
+    while actual_end > start:
+        numbered = [
+            f"{line_no}\t{line}"
+            for line_no, line in enumerate(lines[start:actual_end], start=start + 1)
+        ]
+        base_output = "\n".join(numbered)
+        suffix = (
+            _continuation_notice(start + 1, actual_end, total_lines)
+            if actual_end < total_lines
+            else ""
+        )
+        output = base_output + suffix
+        if len(output) <= READ_FILE_OUTPUT_CHAR_BUDGET:
+            return output, actual_end
+        actual_end -= 1
+
+    suffix = (
+        _continuation_notice(start + 1, start + 1, total_lines)
+        if start + 1 < total_lines
+        else ""
+    )
+    prefix = f"{start + 1}\t"
+    remaining = max(0, READ_FILE_OUTPUT_CHAR_BUDGET - len(prefix) - len(suffix) - 1)
+    first_line = lines[start] if start < len(lines) else ""
+    truncated_line = first_line[:remaining]
+    if len(truncated_line) < len(first_line):
+        truncated_line += "…"
+    return prefix + truncated_line + suffix, min(start + 1, total_lines)
 
 
 # ─── Handler（执行逻辑）─────────────────────────────
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-    """读取文件内容，返回 ToolResult。"""
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
+    """读取文件内容，返回结构化 outcome。"""
     try:
         file_path = safe_path(args["path"], context.working_dir)
     except ValueError as e:
-        return ToolResult(output=str(e), success=False, error="path_escape")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="path_escape",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     # 文件存在性检查
     if not file_path.exists():
-        return ToolResult(output=f"文件不存在: {file_path}", success=False, error="not_found")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="not_found",
+            messages=[make_tool_message(context, f"文件不存在: {file_path}")],
+        )
 
     if not file_path.is_file():
-        return ToolResult(output=f"路径不是文件: {file_path}", success=False, error="not_a_file")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="not_a_file",
+            messages=[make_tool_message(context, f"路径不是文件: {file_path}")],
+        )
 
     # 读取文件
     try:
         lines = file_path.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError:
-        return ToolResult(output="无法读取：可能是二进制文件", success=False, error="binary")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="binary",
+            messages=[make_tool_message(context, "无法读取：可能是二进制文件")],
+        )
     except PermissionError:
-        return ToolResult(output=f"权限不足: {file_path}", success=False, error="permission_denied")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="permission_denied",
+            messages=[make_tool_message(context, f"权限不足: {file_path}")],
+        )
     except OSError as e:
-        return ToolResult(output=str(e), success=False, error="os_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="os_error",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     total_lines = len(lines)
 
@@ -121,24 +201,37 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
 
     # 切片
     start = offset - 1  # 转为 0-indexed
+    if start >= total_lines and total_lines > 0:
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="offset_out_of_range",
+            messages=[make_tool_message(context, f"起始行超出范围：文件共 {total_lines} 行，请使用 1-{total_lines} 之间的 offset。")],
+        )
     end = min(start + limit, total_lines)
-    selected = lines[start:end]
+    output, actual_end = _render_chunk_within_budget(
+        lines,
+        start=start,
+        end=end,
+        total_lines=total_lines,
+    )
+    visible_lines = lines[start:actual_end]
 
-    # 带行号输出
-    numbered = [f"{i}\t{line}" for i, line in enumerate(selected, start=start + 1)]
-    output = "\n".join(numbered)
-
-    # 截断提示
-    if end < total_lines:
-        output += f"\n\n(已截断，显示第 {start + 1}-{end} 行，共 {total_lines} 行)"
-
-    # 记录文件认知（参考 Claude Code 的 readFileState）
     abs_path = str(file_path)
-    context.set_file_state(abs_path, FileState(
-        content="\n".join(lines),
+    full_read = start == 0 and actual_end >= total_lines
+    file_state = FileState(
+        content="\n".join(visible_lines),
         timestamp=file_path.stat().st_mtime,
-        offset=offset if offset > 1 else None,
-        limit=limit if limit < total_lines else None,
-    ))
-
-    return ToolResult(output=output or "(空文件)", success=True)
+        offset=None if full_read else (start + 1),
+        limit=None if full_read else (actual_end - start),
+        total_lines=total_lines,
+    )
+    return ToolInvocationOutcome(
+        status=ToolOutcomeStatus.SUCCESS,
+        messages=[make_tool_message(context, output or "(空文件)")],
+        session_updates=[
+            SessionUpdate(
+                kind=SessionUpdateKind.UPSERT_FILE_STATE,
+                payload={"path": abs_path, "file_state": file_state},
+            )
+        ],
+    )

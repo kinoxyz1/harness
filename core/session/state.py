@@ -3,10 +3,10 @@
 你在数据流中的位置：
     几乎所有组件都通过引用共享 SessionState：
     - SessionEngine 创建并持有它
-    - QueryLoop 读写 turn_count、barrier_reason 等运行时状态
+    - QueryLoop 读写会话级长期状态，并配合 RunState 维护单轮过渡信息
     - PromptAssembler 从中读取 skill_catalog、invoked_skills、todo_state 来渲染 system prompt
     - MessageViewBuilder 从中读取 conversation_messages 来截取 transcript slice
-    - ToolExecutorRuntime 向 read_file_state 写入文件缓存
+    - ToolExecutorRuntime 应用工具返回的 session updates，刷新 read_file_state
 
 两个层次的状态：
     SessionState（本文件）：跨 query 持久化，在一次会话中共享
@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.skills import ActiveSkillState, SkillEvent, SkillMeta
+from core.skills import SkillEvent, SkillMeta
 from core.skills.models import InvokedSkillRecord
 
 
@@ -61,7 +61,8 @@ class SessionState:
 
     read_file_state:
         已读文件的内容缓存（key=绝对路径, value=FileState）。
-        由 read_file 工具写入，PromptAssembler 渲染为 <file-runtime>。
+        由 read_file/write_file/edit_file 等工具通过 session update 维护，
+        PromptAssembler 渲染为 <file-runtime>。
 
     todo_state:
         任务计划。模型通过 todo 工具读写，TodoPlanningPolicy 监控是否过时。
@@ -78,7 +79,6 @@ class SessionState:
     prompt_cache: dict[str, str] = field(default_factory=dict)
     discovered_tools: set[str] = field(default_factory=set)
     skill_catalog: dict[str, SkillMeta] = field(default_factory=dict)
-    active_skills: dict[str, ActiveSkillState] = field(default_factory=dict)  # deprecated
     skill_events: list[SkillEvent] = field(default_factory=list)
     invoked_skills: dict[str, InvokedSkillRecord] = field(default_factory=dict)
     skills_revision: str | None = None

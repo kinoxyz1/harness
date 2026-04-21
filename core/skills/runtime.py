@@ -58,20 +58,20 @@ def ensure_inline_skill_budget(*, state, new_content: str, max_chars: int = 500_
         raise ValueError(f"Inline skill budget exceeded: {used_chars + len(new_content)} > {max_chars}")
 
 
-def apply_skill_invocation(*, state, skill_id: str, content: SkillContent, turn: int) -> InvokedSkillRecord:
-    """激活一个 skill，将其记录到 state.invoked_skills 中。
+def build_invoked_skill_record(*, state, skill_id: str, content: SkillContent, turn: int) -> InvokedSkillRecord:
+    """构造一个 skill 调用记录（纯函数，不写入 state）。
 
-    不再向 conversation_messages 注入任何消息。skill 的运行时内容由
-    PromptAssembler.build_active_skill_messages() 从 state.invoked_skills 实时渲染。
+    会执行 runtime body 渲染和 inline budget 校验，返回可直接用于
+    SessionUpdateKind.INVOKE_SKILL 的 InvokedSkillRecord。
 
     Args:
-        state: 会话状态，invoked_skills 字典会被更新。
+        state: 会话状态，仅用于预算校验（读取 invoked_skills）。
         skill_id: 要激活的 skill 标识符。
         content: 加载后的 skill 内容。
         turn: 激活时的轮次编号。
 
     Returns:
-        创建的 InvokedSkillRecord，已存入 state.invoked_skills。
+        创建的 InvokedSkillRecord。
 
     Raises:
         ValueError: 超出字符预算时。
@@ -84,6 +84,17 @@ def apply_skill_invocation(*, state, skill_id: str, content: SkillContent, turn:
         content_digest=content.content_digest,
         content=body,
         invoked_at_turn=turn,
+    )
+    return record
+
+
+def apply_skill_invocation(*, state, skill_id: str, content: SkillContent, turn: int) -> InvokedSkillRecord:
+    """兼容层：构造 record 并写入 state.invoked_skills。"""
+    record = build_invoked_skill_record(
+        state=state,
+        skill_id=skill_id,
+        content=content,
+        turn=turn,
     )
     state.invoked_skills[skill_id] = record
     return record

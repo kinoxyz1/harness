@@ -3,7 +3,7 @@
 你在数据流中的位置：
     QueryLoop.run()
       → store.append(model_resp.to_message())   ← 你在这里（追加 assistant 消息）
-      → store.extend(batch.tool_results)        ← 追加工具执行结果
+      → store.extend(batch.messages)            ← 追加工具执行结果
       → store.extend(before_messages)            ← 追加策略注入的消息
 
 设计约束：conversation_messages 是 append-only。

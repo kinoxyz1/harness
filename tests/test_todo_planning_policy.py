@@ -1,19 +1,16 @@
 from core.policy.todo_tracking import TodoPlanningPolicy
+from core.query.reducers import apply_run_update, apply_session_update
 from core.query.state import RunState
 from core.session.state import SessionState, TodoItem, TodoState
-from core.tools.context import ExecutionBarrier
-from core.tools.runtime import ToolBatchResult
+from core.tools.builtin.todo import handle
+from core.tools.context import RunUpdateKind, SessionUpdateKind, ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext
 
 
-def test_before_model_call_emits_post_skill_replan_reminder() -> None:
-    policy = TodoPlanningPolicy()
-    session_state = SessionState(conversation_messages=[])
-    run_state = RunState(todo_replan_required=True, todo_replan_reason="skill_expanded")
-
-    messages = policy.before_model_call(session_state, run_state)
-
-    assert len(messages) == 1
-    assert "skill 刚刚展开" in messages[0]["content"]
+def _make_todo_context(session_state: SessionState) -> ToolUseContext:
+    context = ToolUseContext(working_dir=".", max_turns=20)
+    context.bind_runtime(session_state=session_state)
+    context._set_call_identity(name="todo", call_id="toolu_todo", turn=3)
+    return context
 
 
 def test_stale_reminder_requires_existing_plan_and_four_turns() -> None:
@@ -77,125 +74,130 @@ def test_stale_reminder_does_not_fire_without_existing_plan() -> None:
     assert messages == []
 
 
-def test_skill_expanded_barrier_sets_todo_replan_flag() -> None:
-    from core.query.loop import _apply_batch_control_plane
+def test_todo_tool_returns_updates_for_session_and_run_state() -> None:
+    session_state = SessionState(conversation_messages=[])
+    run_state = RunState(assistant_turns_since_todo=5)
+    context = _make_todo_context(session_state)
 
-    state = RunState()
-    batch = ToolBatchResult(
-        tool_results=[],
-        files_modified=[],
-        tool_names=["skill"],
-        tool_successes=[True],
-        injected_messages=[],
-        context_patches=[],
-        barrier=ExecutionBarrier(stop_after_tool=True, reason="skill_expanded"),
+    result = handle(
+        {
+            "items": [
+                {
+                    "content": "Cross-check findings",
+                    "active_form": "Cross-checking findings",
+                    "status": "in_progress",
+                    "workflow_ref": "2.5",
+                },
+                {
+                    "content": "Write summary",
+                    "active_form": "Writing summary",
+                    "status": "pending",
+                },
+            ]
+        },
+        context,
     )
 
-    _apply_batch_control_plane(state, batch)
+    assert isinstance(result, ToolInvocationOutcome)
+    assert result.status == ToolOutcomeStatus.SUCCESS
+    assert result.error is None
+    assert [update.kind for update in result.session_updates] == [SessionUpdateKind.SET_TODO_ITEMS]
+    assert [update.kind for update in result.run_updates] == [RunUpdateKind.RESET_TODO_TURN_COUNTER]
+    assert result.session_updates[0].payload["last_write_turn"] == context.turn_count
+    assert len(result.session_updates[0].payload["items"]) == 2
+    assert len(result.messages) == 1
+    assert "计划已更新 (0/2 完成)。 当前: Cross-check findings" == result.messages[0]["content"]
 
-    assert state.todo_replan_required is True
-    assert state.todo_replan_reason == "skill_expanded"
+    for update in result.session_updates:
+        apply_session_update(session_state, update)
+    for update in result.run_updates:
+        apply_run_update(run_state, update)
 
-
-def test_successful_todo_batch_clears_todo_replan_flag() -> None:
-    from core.query.loop import _apply_batch_control_plane
-
-    state = RunState(
-        todo_replan_required=True,
-        todo_replan_reason="skill_expanded",
-        assistant_turns_since_todo=3,
-    )
-    batch = ToolBatchResult(
-        tool_results=[],
-        files_modified=[],
-        tool_names=["todo"],
-        tool_successes=[True],
-        injected_messages=[],
-        context_patches=[],
-        barrier=None,
-    )
-
-    _apply_batch_control_plane(state, batch)
-
-    assert state.todo_replan_required is False
-    assert state.todo_replan_reason is None
-    assert state.assistant_turns_since_todo == 0
+    assert len(session_state.todo_state.items) == 2
+    assert session_state.todo_state.items[0].content == "Cross-check findings"
+    assert session_state.todo_state.items[0].workflow_ref == "2.5"
+    assert run_state.assistant_turns_since_todo == 0
 
 
-def test_skill_barrier_with_skipped_todo_keeps_replan_flag() -> None:
-    from core.query.loop import _apply_batch_control_plane
+def test_todo_tool_returns_failure_outcome_on_validation_error() -> None:
+    session_state = SessionState(conversation_messages=[])
+    context = _make_todo_context(session_state)
 
-    state = RunState()
-    batch = ToolBatchResult(
-        tool_results=[
-            {"role": "tool", "tool_call_id": "toolu_skill", "content": "skill expanded"},
-            {
-                "role": "tool",
-                "tool_call_id": "toolu_todo",
-                "content": "(skipped: superseded by skill_expanded barrier; re-issue after re-evaluation if still needed)",
-            },
-        ],
-        files_modified=[],
-        tool_names=["skill", "todo"],
-        tool_successes=[True, False],
-        injected_messages=[],
-        context_patches=[],
-        barrier=ExecutionBarrier(stop_after_tool=True, reason="skill_expanded"),
+    result = handle({"items": {"not": "a-list"}}, context)
+
+    assert isinstance(result, ToolInvocationOutcome)
+    assert result.status == ToolOutcomeStatus.FAILURE
+    assert result.error == "validation_failed"
+    assert result.session_updates == []
+    assert result.run_updates == []
+
+
+def test_todo_tool_rejects_multiple_in_progress_items() -> None:
+    session_state = SessionState(conversation_messages=[])
+    context = _make_todo_context(session_state)
+
+    result = handle(
+        {
+            "items": [
+                {"content": "Step 1", "active_form": "Doing step 1", "status": "in_progress"},
+                {"content": "Step 2", "active_form": "Doing step 2", "status": "in_progress"},
+            ]
+        },
+        context,
     )
 
-    _apply_batch_control_plane(state, batch)
+    assert isinstance(result, ToolInvocationOutcome)
+    assert result.status == ToolOutcomeStatus.FAILURE
+    assert result.error == "validation_failed"
+    assert "最多只能有 1 个 in_progress 任务" in result.messages[0]["content"]
+    assert result.session_updates == []
+    assert result.run_updates == []
 
-    assert state.todo_replan_required is True
-    assert state.todo_replan_reason == "skill_expanded"
 
+def test_todo_tool_all_completed_clears_items_and_keeps_completed_snapshot() -> None:
+    session_state = SessionState(conversation_messages=[])
+    context = _make_todo_context(session_state)
 
-def test_failed_todo_batch_keeps_todo_replan_flag() -> None:
-    from core.query.loop import _apply_batch_control_plane
-
-    state = RunState(
-        todo_replan_required=True,
-        todo_replan_reason="skill_expanded",
-        assistant_turns_since_todo=4,
-    )
-    batch = ToolBatchResult(
-        tool_results=[{"role": "tool", "tool_call_id": "toolu_todo", "content": "todo failed"}],
-        files_modified=[],
-        tool_names=["todo"],
-        tool_successes=[False],
-        injected_messages=[],
-        context_patches=[],
-        barrier=None,
+    result = handle(
+        {
+            "items": [
+                {"content": "Step 1", "active_form": "Doing step 1", "status": "completed"},
+                {"content": "Step 2", "active_form": "Doing step 2", "status": "completed"},
+            ]
+        },
+        context,
     )
 
-    _apply_batch_control_plane(state, batch)
+    assert isinstance(result, ToolInvocationOutcome)
+    assert result.status == ToolOutcomeStatus.SUCCESS
+    assert result.messages[0]["content"] == "计划已清空。"
 
-    assert state.todo_replan_required is True
-    assert state.todo_replan_reason == "skill_expanded"
-    assert state.assistant_turns_since_todo == 4
+    for update in result.session_updates:
+        apply_session_update(session_state, update)
+
+    assert session_state.todo_state.items == []
+    assert [item.content for item in session_state.todo_state.last_completed_items] == ["Step 1", "Step 2"]
 
 
-def test_skill_expanded_barrier_wins_over_earlier_successful_todo() -> None:
-    from core.query.loop import _apply_batch_control_plane
-
-    state = RunState(
-        todo_replan_required=True,
-        todo_replan_reason="skill_expanded",
-        assistant_turns_since_todo=2,
+def test_todo_updates_stay_isolated_per_session_state() -> None:
+    session_a = SessionState(
+        conversation_messages=[],
+        todo_state=TodoState(
+            items=[TodoItem(content="A item", active_form="Doing A", status="in_progress")]
+        ),
     )
-    batch = ToolBatchResult(
-        tool_results=[
-            {"role": "tool", "tool_call_id": "toolu_todo", "content": "todo updated"},
-            {"role": "tool", "tool_call_id": "toolu_skill", "content": "skill expanded"},
-        ],
-        files_modified=[],
-        tool_names=["todo", "skill"],
-        tool_successes=[True, True],
-        injected_messages=[],
-        context_patches=[],
-        barrier=ExecutionBarrier(stop_after_tool=True, reason="skill_expanded"),
+    session_b = SessionState(conversation_messages=[])
+    context_b = _make_todo_context(session_b)
+    result_b = handle(
+        {
+            "items": [
+                {"content": "B item", "active_form": "Doing B", "status": "in_progress"},
+            ]
+        },
+        context_b,
     )
+    for update in result_b.session_updates:
+        apply_session_update(session_b, update)
 
-    _apply_batch_control_plane(state, batch)
-
-    assert state.todo_replan_required is True
-    assert state.todo_replan_reason == "skill_expanded"
+    assert [item.content for item in session_a.todo_state.items] == ["A item"]
+    assert [item.content for item in session_b.todo_state.items] == ["B item"]

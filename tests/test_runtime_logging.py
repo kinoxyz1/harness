@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from rich.console import Console
 
+from core.query.reducers import apply_run_update, apply_session_update
+from core.query.state import RunState
 from core.session.state import SessionState, TodoItem
 from core.shared.run_options import RunDisplayOptions
 from core.tools import runtime as runtime_mod
-from core.tools.context import ToolResult, ToolUseContext
+from core.tools.context import ToolInvocationOutcome, ToolUseContext, make_tool_message
 from core.tools.runtime import ToolCall, ToolExecutorRuntime
 from core.ui.renderer import RichRenderer
 
@@ -14,10 +16,9 @@ class FakeRegistry:
     def is_readonly(self, name: str) -> bool:
         return True
 
-    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolResult:
-        return ToolResult(
-            output="\n".join(f"{i}\tline {i}" for i in range(1, 13)),
-            success=True,
+    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolInvocationOutcome:
+        return ToolInvocationOutcome(
+            messages=[make_tool_message(context, "\n".join(f"{i}\tline {i}" for i in range(1, 13)))],
         )
 
 
@@ -25,16 +26,26 @@ class FakeRegistryReturningTodoSuccess:
     def is_readonly(self, name: str) -> bool:
         return False
 
-    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolResult:
-        return ToolResult(output="Todo plan updated successfully.", success=True)
+    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolInvocationOutcome:
+        return ToolInvocationOutcome(messages=[make_tool_message(context, "Todo plan updated successfully.")])
 
 
 class FakeWriteRegistry:
     def is_readonly(self, name: str) -> bool:
         return False
 
-    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolResult:
-        return ToolResult(output="write ok", success=True)
+    def execute(self, name: str, args: dict, context: ToolUseContext) -> ToolInvocationOutcome:
+        return ToolInvocationOutcome(messages=[make_tool_message(context, "write ok")])
+
+
+def _execute_batch(runtime: ToolExecutorRuntime, calls: list[ToolCall]):
+    session_state = SessionState(conversation_messages=[])
+    return runtime.execute_batch(
+        calls,
+        run_state=RunState(),
+        apply_session_update=lambda update: apply_session_update(session_state, update),
+        apply_run_update=apply_run_update,
+    )
 
 
 class FakeRenderer:
@@ -59,7 +70,7 @@ def test_runtime_emits_tool_call_and_result_to_renderer() -> None:
         renderer=renderer,
     )
 
-    runtime.execute_batch([
+    _execute_batch(runtime, [
         ToolCall(idx=0, name="read_file", call_id="call_1", args={"path": "README.md"})
     ])
 
@@ -78,7 +89,7 @@ def test_runtime_compact_mode_hides_internal_trace(capsys) -> None:
         renderer=renderer,
     )
 
-    runtime.execute_batch([
+    _execute_batch(runtime, [
         ToolCall(idx=0, name="read_file", call_id="call_1", args={"path": "README.md"})
     ])
 
@@ -97,7 +108,7 @@ def test_runtime_debug_mode_keeps_internal_trace(capsys) -> None:
         renderer=renderer,
     )
 
-    runtime.execute_batch([
+    _execute_batch(runtime, [
         ToolCall(idx=0, name="read_file", call_id="call_1", args={"path": "README.md"})
     ])
 
@@ -140,7 +151,7 @@ def test_runtime_compact_mode_reports_long_running_status_once(monkeypatch) -> N
         renderer=renderer,
     )
 
-    runtime.execute_batch([
+    _execute_batch(runtime, [
         ToolCall(idx=0, name="bash", call_id="call_1", args={"command": "echo ok"})
     ])
 
@@ -158,7 +169,7 @@ def test_runtime_compact_mode_skips_generic_todo_events_after_query_loop_migrati
         renderer=renderer,
     )
 
-    runtime.execute_batch([ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
+    _execute_batch(runtime, [ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
 
     assert renderer.tool_calls == []
     assert renderer.tool_results == []
@@ -175,7 +186,7 @@ def test_runtime_debug_mode_keeps_generic_todo_events_after_query_loop_migration
         renderer=renderer,
     )
 
-    runtime.execute_batch([ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
+    _execute_batch(runtime, [ToolCall(idx=0, name="todo", call_id="toolu_todo", args={"items": []})])
 
     assert renderer.tool_calls == [("todo", {"items": []})]
     assert renderer.tool_results == [("todo", "Todo plan updated successfully.")]
@@ -248,6 +259,21 @@ def test_renderer_marks_runtime_truncation_in_read_file_summary() -> None:
 
     assert "runtime 截断" in output
     assert "不是文件只有这些内容" in output
+
+
+def test_renderer_marks_tool_managed_read_file_paging_in_summary() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_tool_result(
+        "read_file",
+        "1\talpha\n2\tbeta\n\n(文件较大，已显示第 1-2 行，共 725 行；继续读取请使用 offset=3)",
+    )
+
+    output = console.export_text()
+
+    assert "已读取文件内容，预览 2 行" in output
+    assert "继续用 offset" in output
 
 
 def test_renderer_marks_runtime_truncation_in_generic_preview() -> None:

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..context import ToolUseContext, ToolResult
+from ..context import ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext, make_tool_message
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -85,7 +85,7 @@ MAX_RESULTS = 200
 # ─── Handler（执行逻辑）─────────────────────────────
 
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     """按 glob 模式搜索文件。"""
     pattern = args["pattern"]
     search_dir = args.get("path", context.working_dir)
@@ -95,7 +95,11 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
         search_path = Path(context.working_dir) / search_path
 
     if not search_path.is_dir():
-        return ToolResult(output=f"目录不存在: {search_path}", success=False, error="not_found")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="not_found",
+            messages=[make_tool_message(context, f"目录不存在: {search_path}")],
+        )
 
     # 执行 glob 匹配
     try:
@@ -105,14 +109,21 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
             reverse=True,
         )
     except OSError as e:
-        return ToolResult(output=str(e), success=False, error="os_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="os_error",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     # 只保留文件（排除目录），限制数量
     files = [p for p in matches if p.is_file()][:MAX_RESULTS]
     truncated = len([p for p in matches if p.is_file()]) > MAX_RESULTS
 
     if not files:
-        return ToolResult(output=f"未找到匹配 '{pattern}' 的文件", success=True)
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.SUCCESS,
+            messages=[make_tool_message(context, f"未找到匹配 '{pattern}' 的文件")],
+        )
 
     # 输出相对路径（如果可能）
     try:
@@ -125,4 +136,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     if truncated:
         output += f"\n\n(结果过多，仅显示前 {MAX_RESULTS} 个)"
 
-    return ToolResult(output=output, success=True)
+    return ToolInvocationOutcome(
+        status=ToolOutcomeStatus.SUCCESS,
+        messages=[make_tool_message(context, output)],
+    )

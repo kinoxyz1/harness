@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.session.state import TodoItem, TodoState
+from core.session.state import TodoItem
 
-from ..context import ToolResult, ToolUseContext
+from ..context import (
+    RunUpdate,
+    RunUpdateKind,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolInvocationOutcome,
+    ToolOutcomeStatus,
+    ToolUseContext,
+    make_tool_message,
+)
 
 
 # ─── Tool 定义（给模型看）───────────────────────────
@@ -14,7 +23,7 @@ SCHEMA: dict[str, Any] = {
     "name": "todo",
     "description": (
         "Rewrite the current session plan for non-trivial multi-step work. "
-        "Use this early for tasks that require multiple actions, especially after a skill was just expanded. "
+        "Use this early for tasks that require multiple actions, including after a newly loaded skill changes the workflow. "
         "Mirror the active workflow instead of collapsing it into 1-2 vague items. "
         "Keep exactly one in_progress item whenever active work exists. "
         "Update the plan as tasks complete or scope changes. "
@@ -74,10 +83,6 @@ ANNOTATIONS: dict[str, bool] = {
     "idempotent": True,
     "concurrency_safe": False,  # 修改内部状态，串行执行
 }
-
-# 兼容层：保留只读查询 API，指向最近一次成功写入的 session todo_state。
-_latest_todo_state: TodoState | None = None
-
 
 # ─── 内部逻辑 ───────────────────────────────────────
 
@@ -139,23 +144,35 @@ def _render_progress(items: list[TodoItem]) -> str:
 
 # ─── Handler（执行逻辑）─────────────────────────────
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     """处理 todo 调用，更新任务状态。"""
     state = context.session_state
     if state is None:
-        return ToolResult(output="No session state available", success=False, error="no_state")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="no_state",
+            messages=[make_tool_message(context, "No session state available")],
+        )
 
     if not isinstance(args, dict):
-        return ToolResult(output="参数错误: args 必须是对象", success=False, error="validation_failed")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="validation_failed",
+            messages=[make_tool_message(context, "参数错误: args 必须是对象")],
+        )
 
     items_data = args.get("items")
 
     # 验证
     valid, error = _validate_items(items_data)
     if not valid:
-        return ToolResult(output=f"参数错误: {error}", success=False, error="validation_failed")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="validation_failed",
+            messages=[make_tool_message(context, f"参数错误: {error}")],
+        )
 
-    # 写入 session state
+    # 规范化 todo 项
     items = [
         TodoItem(
             content=item["content"].strip(),
@@ -167,48 +184,28 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     ]
 
     if items and all(item.status == "completed" for item in items):
-        state.todo_state.items = []
-        state.todo_state.last_completed_items = items
+        todo_items: list[TodoItem] = []
     else:
-        state.todo_state.items = items
-        state.todo_state.last_completed_items = []
-    state.todo_state.last_write_turn = context.turn_count
-
-    # 兼容层记录最近一次会话级 todo 状态（只读快照由 get_state 提供）。
-    global _latest_todo_state
-    _latest_todo_state = state.todo_state
+        todo_items = items
 
     # 返回渲染后的进度
-    output = _render_progress(state.todo_state.items)
-    return ToolResult(output=output, success=True)
-
-
-# ─── 对外暴露的 API（供 AgentLoop 使用）──────────────
-
-def get_state() -> TodoState:
-    """获取当前规划状态（供 AgentLoop 查询）。"""
-    source = _latest_todo_state
-    if source is None:
-        return TodoState()
-    return TodoState(
-        items=[
-            TodoItem(
-                content=item.content,
-                active_form=item.active_form,
-                status=item.status,
-                workflow_ref=item.workflow_ref,
+    output = _render_progress(todo_items)
+    return ToolInvocationOutcome(
+        status=ToolOutcomeStatus.SUCCESS,
+        session_updates=[
+            SessionUpdate(
+                kind=SessionUpdateKind.SET_TODO_ITEMS,
+                payload={
+                    "items": items,
+                    "last_write_turn": context.turn_count,
+                },
             )
-            for item in source.items
         ],
-        last_completed_items=[
-            TodoItem(
-                content=item.content,
-                active_form=item.active_form,
-                status=item.status,
-                workflow_ref=item.workflow_ref,
+        run_updates=[
+            RunUpdate(
+                kind=RunUpdateKind.RESET_TODO_TURN_COUNTER,
+                payload={},
             )
-            for item in source.last_completed_items
         ],
-        last_write_turn=source.last_write_turn,
-        last_reminder_turn=source.last_reminder_turn,
+        messages=[make_tool_message(context, output)],
     )

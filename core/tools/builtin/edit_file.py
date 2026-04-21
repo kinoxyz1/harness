@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from ..context import ToolUseContext, ToolResult, safe_path
+from ..context import (
+    FileState,
+    RunUpdate,
+    RunUpdateKind,
+    SessionUpdate,
+    SessionUpdateKind,
+    ToolInvocationOutcome,
+    ToolOutcomeStatus,
+    ToolUseContext,
+    make_tool_message,
+    safe_path,
+)
 
 # ─── Tool 定义（给模型看）───────────────────────────
 
@@ -86,38 +96,50 @@ PROMPT: str = """\
 # ─── Handler（执行逻辑）─────────────────────────────
 
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
+def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     """基于字符串替换编辑文件。"""
     try:
         file_path = safe_path(args["path"], context.working_dir)
     except ValueError as e:
-        return ToolResult(output=str(e), success=False, error="path_escape")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="path_escape",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     # ── read-before-write 强制检查 ──
     abs_path = str(file_path)
     state = context.get_file_state(abs_path)
     if not state or not state.is_full_read:
-        return ToolResult(
-            output="请先使用 read_file 完整读取此文件，再进行编辑。",
-            success=False,
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
             error="not_read",
+            messages=[make_tool_message(context, "请先使用 read_file 完整读取此文件，再进行编辑。")],
         )
 
     # ── staleness 检测 ──
     if file_path.exists():
         current_mtime = file_path.stat().st_mtime
         if current_mtime != state.timestamp:
-            return ToolResult(
-                output="文件在你读取后被修改了，请重新读取后再编辑。",
-                success=False,
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.FAILURE,
                 error="stale",
+                messages=[make_tool_message(context, "文件在你读取后被修改了，请重新读取后再编辑。")],
             )
 
     if not file_path.exists():
-        return ToolResult(output=f"文件不存在: {file_path}", success=False, error="not_found")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="not_found",
+            messages=[make_tool_message(context, f"文件不存在: {file_path}")],
+        )
 
     if not file_path.is_file():
-        return ToolResult(output=f"路径不是文件: {file_path}", success=False, error="not_a_file")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="not_a_file",
+            messages=[make_tool_message(context, f"路径不是文件: {file_path}")],
+        )
 
     old_string = args["old_string"]
     new_string = args["new_string"]
@@ -127,25 +149,33 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     try:
         content = file_path.read_text(encoding="utf-8")
     except PermissionError:
-        return ToolResult(output=f"权限不足: {file_path}", success=False, error="permission_denied")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="permission_denied",
+            messages=[make_tool_message(context, f"权限不足: {file_path}")],
+        )
     except OSError as e:
-        return ToolResult(output=str(e), success=False, error="os_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="os_error",
+            messages=[make_tool_message(context, str(e))],
+        )
 
     # 检查 old_string 是否存在
     if old_string not in content:
-        return ToolResult(
-            output=f"未找到要替换的文本。请确保 old_string 与文件内容精确匹配（包括缩进和空行）。",
-            success=False,
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
             error="not_found",
+            messages=[make_tool_message(context, "未找到要替换的文本。请确保 old_string 与文件内容精确匹配（包括缩进和空行）。")],
         )
 
     # 检查唯一性（非 replace_all 模式）
     count = content.count(old_string)
     if count > 1 and not replace_all:
-        return ToolResult(
-            output=f"找到 {count} 处匹配，但 replace_all 为 false。请提供更精确的 old_string 或设置 replace_all 为 true。",
-            success=False,
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
             error="ambiguous_match",
+            messages=[make_tool_message(context, f"找到 {count} 处匹配，但 replace_all 为 false。请提供更精确的 old_string 或设置 replace_all 为 true。")],
         )
 
     # 执行替换
@@ -160,10 +190,26 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
     try:
         file_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
-        return ToolResult(output=str(e), success=False, error="write_error")
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="write_error",
+            messages=[make_tool_message(context, str(e))],
+        )
 
-    # 更新文件认知
-    context.update_file_state(abs_path, new_content)
-    context.mark_file_modified(abs_path)
-
-    return ToolResult(output=f"已替换 {replaced} 处匹配", success=True)
+    file_state = FileState(content=new_content, timestamp=file_path.stat().st_mtime)
+    return ToolInvocationOutcome(
+        status=ToolOutcomeStatus.SUCCESS,
+        messages=[make_tool_message(context, f"已替换 {replaced} 处匹配")],
+        session_updates=[
+            SessionUpdate(
+                kind=SessionUpdateKind.UPSERT_FILE_STATE,
+                payload={"path": abs_path, "file_state": file_state},
+            )
+        ],
+        run_updates=[
+            RunUpdate(
+                kind=RunUpdateKind.MARK_FILE_MODIFIED,
+                payload={"path": abs_path},
+            )
+        ],
+    )
