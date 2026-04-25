@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1400">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&amp;display=swap');
+      text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .title { fill: #e2e8f0; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .node-text { fill: #cbd5e1; font-size: 10px; }
+      .label { fill: #fbbf24; font-size: 9px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="1080" height="1400" fill="#0f172a"/>
+  <rect width="1080" height="1400" fill="url(#grid)"/>
+
+  <text x="36" y="42" class="title">Todo 运行时生命周期图</text>
+  <text x="36" y="64" class="subtitle">对应代码：core/tools/builtin/todo.py / core/query/reducers.py / core/policy/todo_tracking.py / core/session/state.py</text>
+
+  <rect x="400" y="96" width="280" height="54" rx="26" fill="#0f172a"/>
+  <rect x="400" y="96" width="280" height="54" rx="26" fill="rgba(59,130,246,0.30)" stroke="#60a5fa" stroke-width="1.6"/>
+  <text x="540" y="128" text-anchor="middle" class="node-title">模型决定调用 todo 工具</text>
+
+  <rect x="360" y="196" width="360" height="92" rx="10" fill="#0f172a"/>
+  <rect x="360" y="196" width="360" height="92" rx="10" fill="rgba(8,51,68,0.36)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="540" y="228" text-anchor="middle" class="node-title">todo.handle(args, context)</text>
+  <text x="540" y="250" text-anchor="middle" class="node-text">要求 items 是完整列表，不支持增量 patch</text>
+  <text x="540" y="272" text-anchor="middle" class="node-text">每项必须有 content / active_form / status</text>
+
+  <g transform="translate(540, 366)">
+    <polygon points="0,-42 96,0 0,42 -96,0" fill="#0f172a"/>
+    <polygon points="0,-42 96,0 0,42 -96,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">校验通过？</text>
+    <text y="18" text-anchor="middle" class="node-text">最多 20 项，最多 1 个 in_progress</text>
+  </g>
+
+  <rect x="736" y="322" width="228" height="88" rx="10" fill="#0f172a"/>
+  <rect x="736" y="322" width="228" height="88" rx="10" fill="rgba(136,19,55,0.34)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="850" y="354" text-anchor="middle" class="node-title">失败</text>
+  <text x="850" y="376" text-anchor="middle" class="node-text">返回 validation_failed</text>
+  <text x="850" y="396" text-anchor="middle" class="node-text">只产出 tool message，不回写状态</text>
+
+  <rect x="344" y="454" width="392" height="108" rx="12" fill="#0f172a"/>
+  <rect x="344" y="454" width="392" height="108" rx="12" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="540" y="488" text-anchor="middle" class="node-title">成功返回 ToolInvocationOutcome</text>
+  <text x="540" y="512" text-anchor="middle" class="node-text">SessionUpdate(SET_TODO_ITEMS)</text>
+  <text x="540" y="534" text-anchor="middle" class="node-text">RunUpdate(RESET_TODO_TURN_COUNTER)</text>
+
+  <rect x="344" y="612" width="392" height="88" rx="12" fill="#0f172a"/>
+  <rect x="344" y="612" width="392" height="88" rx="12" fill="rgba(120,53,15,0.28)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="540" y="644" text-anchor="middle" class="node-title">reducer 应用 SET_TODO_ITEMS</text>
+  <text x="540" y="666" text-anchor="middle" class="node-text">last_write_turn = context.turn_count</text>
+  <text x="540" y="686" text-anchor="middle" class="node-text">RESET_TODO_TURN_COUNTER 把 assistant_turns_since_todo 置 0</text>
+
+  <g transform="translate(540, 778)">
+    <polygon points="0,-42 88,0 0,42 -88,0" fill="#0f172a"/>
+    <polygon points="0,-42 88,0 0,42 -88,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">全部完成？</text>
+    <text y="18" text-anchor="middle" class="node-text">all(item.status == completed)</text>
+  </g>
+
+  <rect x="120" y="852" width="316" height="104" rx="12" fill="#0f172a"/>
+  <rect x="120" y="852" width="316" height="104" rx="12" fill="rgba(76,29,149,0.30)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="278" y="884" text-anchor="middle" class="node-title">否：保留当前计划</text>
+  <text x="278" y="908" text-anchor="middle" class="node-text">todo_state.items = items</text>
+  <text x="278" y="930" text-anchor="middle" class="node-text">last_completed_items = []</text>
+
+  <rect x="644" y="852" width="316" height="104" rx="12" fill="#0f172a"/>
+  <rect x="644" y="852" width="316" height="104" rx="12" fill="rgba(59,130,246,0.30)" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="802" y="884" text-anchor="middle" class="node-title">是：收尾清空</text>
+  <text x="802" y="908" text-anchor="middle" class="node-text">todo_state.items = []</text>
+  <text x="802" y="930" text-anchor="middle" class="node-text">last_completed_items = 原列表</text>
+
+  <rect x="286" y="1018" width="508" height="92" rx="12" fill="#0f172a"/>
+  <rect x="286" y="1018" width="508" height="92" rx="12" fill="rgba(30,41,59,0.56)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="540" y="1050" text-anchor="middle" class="node-title">下一轮 PromptAssembler.build_runtime_context()</text>
+  <text x="540" y="1072" text-anchor="middle" class="node-text">把 todo_state 渲染到 &lt;todo-state&gt;，不是依赖旧 transcript 中的某条计划消息</text>
+  <text x="540" y="1094" text-anchor="middle" class="node-text">这也是“计划真相在显式状态里”的核心</text>
+
+  <rect x="92" y="1180" width="344" height="112" rx="12" fill="#0f172a"/>
+  <rect x="92" y="1180" width="344" height="112" rx="12" fill="rgba(8,51,68,0.36)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="264" y="1214" text-anchor="middle" class="node-title">工作轮没有调 todo</text>
+  <text x="264" y="1238" text-anchor="middle" class="node-text">_note_assistant_turn() 递增</text>
+  <text x="264" y="1260" text-anchor="middle" class="node-text">assistant_turns_since_todo += 1</text>
+
+  <g transform="translate(540, 1236)">
+    <polygon points="0,-42 98,0 0,42 -98,0" fill="#0f172a"/>
+    <polygon points="0,-42 98,0 0,42 -98,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">达到 4 轮</text>
+    <text y="18" text-anchor="middle" class="node-title">未更新？</text>
+  </g>
+
+  <rect x="704" y="1180" width="284" height="112" rx="12" fill="#0f172a"/>
+  <rect x="704" y="1180" width="284" height="112" rx="12" fill="rgba(136,19,55,0.34)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="846" y="1214" text-anchor="middle" class="node-title">TodoPlanningPolicy</text>
+  <text x="846" y="1238" text-anchor="middle" class="node-text">注入 todo_stale reminder</text>
+  <text x="846" y="1260" text-anchor="middle" class="node-text">last_reminder_turn 防止同轮重复提醒</text>
+
+  <path d="M 846 1292 L 846 1340 L 540 1340 L 540 150" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="8 5" marker-end="url(#arrow)"/>
+  <text x="858" y="1332" class="label">模型看到提醒后通常会重写 todo，全流程再走一遍</text>
+
+  <rect x="328" y="1324" width="424" height="42" rx="10" fill="rgba(15,23,42,0.92)" stroke="#334155" stroke-width="1"/>
+  <text x="540" y="1350" text-anchor="middle" class="node-text">关键约束：全量替换、最多一个 in_progress、全部完成时清空 items 但保留 completed 摘要。</text>
+
+  <line x1="540" y1="150" x2="540" y2="196" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="540" y1="288" x2="540" y2="324" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="636" y1="366" x2="736" y2="366" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="684" y="354" class="label">否</text>
+  <line x1="540" y1="408" x2="540" y2="454" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="552" y="430" class="label">是</text>
+  <line x1="540" y1="562" x2="540" y2="612" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="540" y1="700" x2="540" y2="736" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="452" y1="778" x2="278" y2="778" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="278" y1="778" x2="278" y2="852" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="350" y="766" class="label">否</text>
+  <line x1="628" y1="778" x2="802" y2="778" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="802" y1="778" x2="802" y2="852" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="732" y="766" class="label">是</text>
+  <line x1="278" y1="956" x2="278" y2="1064" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="278" y1="1064" x2="286" y2="1064" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="802" y1="956" x2="802" y2="1064" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="802" y1="1064" x2="794" y2="1064" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="436" y1="1236" x2="442" y2="1236" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="638" y1="1236" x2="704" y2="1236" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>

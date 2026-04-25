@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 760">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&amp;display=swap');
+      text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .title { fill: #e2e8f0; font-size: 24px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .box-title { fill: #f8fafc; font-size: 14px; font-weight: 700; }
+      .box-text { fill: #cbd5e1; font-size: 11px; }
+      .small { fill: #94a3b8; font-size: 10px; }
+      .label { fill: #fbbf24; font-size: 10px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="1320" height="760" fill="#0f172a"/>
+  <rect width="1320" height="760" fill="url(#grid)"/>
+
+  <text x="40" y="44" class="title">Tool System 当前实现分层图</text>
+  <text x="40" y="68" class="subtitle">对应代码：core/tools/__init__.py / core/tools/runtime.py / core/tools/context.py / core/query/reducers.py</text>
+
+  <rect x="34" y="96" width="1252" height="600" rx="18" fill="none" stroke="#334155" stroke-width="1.2" stroke-dasharray="8 5"/>
+  <text x="54" y="118" class="small">模型看到 schema，执行层拿到 handler，真正写状态只能经过 updates + reducer</text>
+
+  <rect x="70" y="160" width="180" height="110" rx="10" fill="#0f172a"/>
+  <rect x="70" y="160" width="180" height="110" rx="10" fill="rgba(8, 51, 68, 0.40)" stroke="#22d3ee" stroke-width="1.6"/>
+  <text x="160" y="190" text-anchor="middle" class="box-title">模型 / LLM</text>
+  <text x="160" y="215" text-anchor="middle" class="box-text">接收 tools schema</text>
+  <text x="160" y="235" text-anchor="middle" class="box-text">产出 tool_calls</text>
+  <text x="160" y="255" text-anchor="middle" class="small">不知道 handler 在哪</text>
+
+  <rect x="300" y="138" width="220" height="154" rx="12" fill="#0f172a"/>
+  <rect x="300" y="138" width="220" height="154" rx="12" fill="rgba(120, 53, 15, 0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+  <text x="410" y="170" text-anchor="middle" class="box-title">ToolRegistry</text>
+  <text x="410" y="195" text-anchor="middle" class="box-text">auto_discover() 扫描 builtin/</text>
+  <text x="410" y="215" text-anchor="middle" class="box-text">register() 收集 SCHEMA / handle</text>
+  <text x="410" y="235" text-anchor="middle" class="box-text">is_readonly() 决定调度语义</text>
+  <text x="410" y="260" text-anchor="middle" class="small">名字 → handler / schema / annotations</text>
+
+  <rect x="300" y="334" width="220" height="220" rx="12" fill="#0f172a"/>
+  <rect x="300" y="334" width="220" height="220" rx="12" fill="rgba(76, 29, 149, 0.34)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="410" y="366" text-anchor="middle" class="box-title">builtin tools</text>
+  <text x="410" y="392" text-anchor="middle" class="box-text">read_file / find</text>
+  <text x="410" y="412" text-anchor="middle" class="box-text">write_file / edit_file / bash</text>
+  <text x="410" y="432" text-anchor="middle" class="box-text">skill / todo</text>
+  <text x="410" y="465" text-anchor="middle" class="small">每个模块暴露：</text>
+  <text x="410" y="485" text-anchor="middle" class="small">SCHEMA / READONLY / ANNOTATIONS / handle()</text>
+  <text x="410" y="515" text-anchor="middle" class="small">工具自己不直接改 SessionState / RunState</text>
+
+  <rect x="600" y="128" width="310" height="440" rx="14" fill="#0f172a"/>
+  <rect x="600" y="128" width="310" height="440" rx="14" fill="rgba(6, 78, 59, 0.35)" stroke="#34d399" stroke-width="1.6"/>
+  <text x="755" y="162" text-anchor="middle" class="box-title">ToolExecutorRuntime</text>
+  <text x="755" y="190" text-anchor="middle" class="box-text">_partition()：只读并行，写入串行</text>
+  <text x="755" y="212" text-anchor="middle" class="box-text">_run_single()：执行单个 handler</text>
+  <text x="755" y="234" text-anchor="middle" class="box-text">_apply_updates()：立即应用 run/session updates</text>
+  <text x="755" y="266" text-anchor="middle" class="small">输入：ToolCall(name, call_id, args)</text>
+  <text x="755" y="286" text-anchor="middle" class="small">输出：ToolBatchResult(messages, session_updates, run_updates)</text>
+
+  <rect x="640" y="332" width="110" height="84" rx="10" fill="#0f172a"/>
+  <rect x="640" y="332" width="110" height="84" rx="10" fill="rgba(8, 51, 68, 0.35)" stroke="#22d3ee" stroke-width="1.4"/>
+  <text x="695" y="364" text-anchor="middle" class="box-title" style="font-size:12px">只读批次</text>
+  <text x="695" y="388" text-anchor="middle" class="small">ThreadPool</text>
+
+  <rect x="770" y="332" width="110" height="84" rx="10" fill="#0f172a"/>
+  <rect x="770" y="332" width="110" height="84" rx="10" fill="rgba(136, 19, 55, 0.35)" stroke="#fb7185" stroke-width="1.4"/>
+  <text x="825" y="364" text-anchor="middle" class="box-title" style="font-size:12px">写入批次</text>
+  <text x="825" y="388" text-anchor="middle" class="small">串行独占</text>
+
+  <rect x="640" y="450" width="240" height="86" rx="10" fill="#0f172a"/>
+  <rect x="640" y="450" width="240" height="86" rx="10" fill="rgba(30, 41, 59, 0.55)" stroke="#94a3b8" stroke-width="1.4"/>
+  <text x="760" y="480" text-anchor="middle" class="box-title" style="font-size:12px">ToolInvocationOutcome</text>
+  <text x="760" y="502" text-anchor="middle" class="small">messages + session_updates + run_updates</text>
+  <text x="760" y="522" text-anchor="middle" class="small">状态改动声明在结果里，不散落在 handler 内部</text>
+
+  <rect x="980" y="150" width="260" height="176" rx="12" fill="#0f172a"/>
+  <rect x="980" y="150" width="260" height="176" rx="12" fill="rgba(120, 53, 15, 0.26)" stroke="#fb923c" stroke-width="1.6"/>
+  <text x="1110" y="182" text-anchor="middle" class="box-title">apply_run_update()</text>
+  <text x="1110" y="206" text-anchor="middle" class="box-text">MARK_FILE_MODIFIED</text>
+  <text x="1110" y="226" text-anchor="middle" class="box-text">NARROW_ALLOWED_TOOLS</text>
+  <text x="1110" y="246" text-anchor="middle" class="box-text">RESET_TODO_TURN_COUNTER</text>
+  <text x="1110" y="272" text-anchor="middle" class="small">RunState 是单次 query 内部控制状态</text>
+
+  <rect x="980" y="372" width="260" height="208" rx="12" fill="#0f172a"/>
+  <rect x="980" y="372" width="260" height="208" rx="12" fill="rgba(76, 29, 149, 0.30)" stroke="#a78bfa" stroke-width="1.6"/>
+  <text x="1110" y="404" text-anchor="middle" class="box-title">apply_session_update()</text>
+  <text x="1110" y="428" text-anchor="middle" class="box-text">INVOKE_SKILL / SET_TODO_ITEMS</text>
+  <text x="1110" y="448" text-anchor="middle" class="box-text">UPSERT_FILE_STATE / INVALIDATE_FILE_STATE</text>
+  <text x="1110" y="468" text-anchor="middle" class="box-text">APPEND_SKILL_EVENT</text>
+  <text x="1110" y="500" text-anchor="middle" class="small">SessionState 持有长期真相：</text>
+  <text x="1110" y="520" text-anchor="middle" class="small">invoked_skills / todo_state / read_file_state</text>
+  <text x="1110" y="540" text-anchor="middle" class="small">不依赖旧 transcript 残留</text>
+
+  <line x1="250" y1="215" x2="300" y2="215" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="276" y="205" text-anchor="middle" class="label">tool_calls</text>
+
+  <line x1="520" y1="215" x2="600" y2="215" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="560" y="205" text-anchor="middle" class="label">execute_batch</text>
+
+  <line x1="410" y1="292" x2="410" y2="334" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="430" y="320" class="label">模块注册</text>
+
+  <line x1="520" y1="444" x2="600" y2="444" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="560" y="434" text-anchor="middle" class="label">handler(args, context)</text>
+
+  <line x1="910" y1="230" x2="980" y2="230" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="945" y="220" text-anchor="middle" class="label">run_updates</text>
+
+  <line x1="910" y1="476" x2="980" y2="476" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="945" y="466" text-anchor="middle" class="label">session_updates</text>
+
+  <line x1="1110" y1="326" x2="1110" y2="372" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="1130" y="352" class="small">两类更新并列进入 reducer</text>
+
+  <path d="M 760 536 L 760 626 L 160 626 L 160 270" fill="none" stroke="#60a5fa" stroke-width="2.2" stroke-dasharray="8 5" marker-end="url(#arrow)"/>
+  <text x="430" y="648" text-anchor="middle" class="label">tool messages 追加回 transcript，下一轮模型再看到结果</text>
+
+  <rect x="70" y="630" width="1170" height="42" rx="10" fill="rgba(15, 23, 42, 0.92)" stroke="#334155" stroke-width="1"/>
+  <text x="655" y="656" text-anchor="middle" class="box-text">最关键边界：模型选择工具，Runtime 负责执行，工具只声明 updates，Reducer 才是唯一状态写入口。</text>
+</svg>

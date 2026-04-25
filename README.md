@@ -1,283 +1,139 @@
-# Harness — 极简 AI Agent 框架
+# Harness
 
-受 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 启发的终端 AI Agent 框架。
-用最少的代码实现一个能读写文件、执行命令、调用 Skills、运行子代理的编码助手。
+一个用于学习 Agent 运行时内部机制的终端框架。
 
-**适合谁：** 想理解 AI Agent 工作原理的开发者。核心代码约 4000 行，所有逻辑一目了然。
+代码本身就是教材——每个模块职责收窄到一件事，文件顶部都有模块级注释说明"你在数据流中的位置"。目标是读完这个仓库后，你能回答：
 
-## 30 秒上手
+- 一个 Agent 的 think-act 循环到底在循环什么？退出条件有哪些？
+- 模型看到的"输入"是怎么从内部状态组装出来的？system 和 messages 为什么分开？
+- 工具调用的结果怎么回到模型？为什么不让工具直接改状态？
+- 上下文窗口不够时怎么办？transcript 截取和 thinking 清理的策略是什么？
+
+## 核心设计
+
+主流 Agent 把"完整对话历史"直接喂给模型。Harness 的做法不同——维护显式状态，每轮重组视图：
+
+1. **显式状态**（SessionState + RunState）保存运行时真相，不是散落在对话历史里的文本
+2. **视图组装器**（MessageViewBuilder）每轮从状态重建模型输入，从状态而非历史拼装
+3. **reducer 是唯一状态写入口**——工具只返回结构化 updates，不直接改 QueryLoop 状态
+
+这三个约束把系统从"基于历史消息拼运气"变成"基于状态重组视图"的 Agent runtime。
+
+## 快速开始
 
 ```bash
-# 1. 安装依赖
 pip install -r requirements.txt
-
-# 2. 配置 API Key
 cp .env.example .env
-# 编辑 .env，填入你的 API Key
+# 编辑 .env，填入 API Key
 
-# 3. 启动
 python 01_agent_loop.py
 ```
 
-启动后进入交互式终端：
-
-```
+```text
 Agent Loop 已启动。输入 exit 或 quit 退出。
 
->> 你好
-你好！有什么可以帮你的吗？
-
->> 阅读 tests/test.txt 并用 Python 解决问题
-⚡ Read(tests/test.txt)       → 读取文件内容
-⚡ Bash(python solve.py)     → 编写并运行解题脚本
-✅ 完成题目
-✅ 清理临时文件
+>> /skills list
+>> 阅读 README.md 并总结
 ```
 
-## 核心架构
+## 数据流
 
+```text
+用户输入
+  → SessionEngine.submit_user_message()
+    → QueryLoop.run()
+      ┌──────────────────────────────────┐
+      │ while True:                       │
+      │   maintenance（文件缓存失效检查）  │
+      │   policy before_model_call        │
+      │   MessageViewBuilder.build()      │
+      │   ModelGateway.call_once()        │
+      │   有 tool_calls → 执行 → reducer  │
+      │   有最终文本   → return            │
+      │   空响应       → recovery 重试     │
+      └──────────────────────────────────┘
+    ← QueryResult
 ```
-用户输入 → SessionEngine
-              ├── PromptAssembler  → 系统提示词 + Skills 目录
-              ├── QueryLoop        → 思考-行动循环
-              │     ├── ModelGateway      → LLM API 调用
-              │     ├── ToolExecutorRuntime → 工具并行/串行调度
-              │     ├── PolicyRunner      → 轮次限制 + 计划追踪
-              │     └── RecoveryManager   → 空/截断响应恢复
-              ├── SessionStore     → 对话历史
-              └── SkillRegistry    → Skills 发现与加载
-```
 
-**工作流程：** 用户输入 → Prompt 组装 → LLM 思考 → 需要工具？→ 执行工具 → 结果送回 LLM → 继续思考或输出回答。
-
-## 功能特性
-
-### 内置工具
-
-Agent 收到指令后，自主决定是否使用工具。简单问答直接回答，复杂任务通过工具逐步执行。
-
-| 工具 | 作用 | 读写 |
-|------|------|------|
-| `read_file` | 读取文件内容（带行号，支持分段） | 只读 |
-| `write_file` | 写入或追加文件 | 写 |
-| `edit_file` | 精确替换文件中的文本 | 写 |
-| `find` | 按 Glob 模式搜索文件 | 只读 |
-| `bash` | 执行终端命令（带超时和安全检查） | 写 |
-| `todo` | 管理多步骤任务的计划 | 写 |
-| `skill` | 内联加载 Skill 知识包 | 写 |
-
-**执行调度：** 只读工具并行执行（ThreadPoolExecutor），写工具串行执行。工具输出超过 30000 字符自动截断。
-
-### Skills 系统
-
-Skill 是模块化的知识包，放在 `.harness/skills/` 下，扩展 Agent 的专业能力。
-
-- **使用方式：** 终端输入 `/skills list` 查看目录，`/skills use <id>` 加载，或 Agent 自主通过 `skill` 工具调用
-- **创建 Skill：** 在 `.harness/skills/` 下新建目录，放入 `SKILL.md`（YAML 前置元数据 + Markdown 正文），可选加入 `references/` 参考文件
-- **内联注入：** Skill 内容作为系统消息注入对话，24K 字符预算
-
-### 子代理（Subagent）
-
-三种预置子代理，各自在隔离会话中运行：
-
-| 类型 | 工具权限 | 最大轮次 | 用途 |
-|------|----------|----------|------|
-| EXPLORE | find, read_file, todo | 10 | 只读探索代码库 |
-| PLAN | find, read_file, todo | 12 | 规划实现方案 |
-| GENERAL | 全部工具（不含子代理） | 20 | 通用任务执行 |
-
-### 策略系统
-
-- **MaxTurnsPolicy** — 工具调用轮次上限，防止无限循环
-- **TodoPlanningPolicy** — 监控计划新鲜度，连续 4 轮未更新时提醒 Agent 刷新计划
+退出循环：正常完成 | max_turns 强制收尾 | recovery 失败。
 
 ## 项目结构
 
-```
+```text
 harness/
-├── 01_agent_loop.py           # 入口：启动交互式 REPL
+├── 01_agent_loop.py          # 入口：REPL + 依赖装配
 ├── core/
-│   ├── llm/                   # LLM 客户端
-│   │   ├── anthropic_client.py  #   Anthropic API 封装（含 thinking 支持）
-│   │   ├── client.py            #   ModelGateway 门面
-│   │   ├── factory.py           #   客户端工厂
-│   │   ├── protocol.py          #   消息格式规范化
-│   │   └── response.py          #   响应数据类
-│   ├── policy/                # 执行策略
-│   │   ├── base.py              #   RunPolicy 协议
-│   │   ├── max_turns.py         #   轮次限制
-│   │   └── todo_tracking.py     #   计划追踪
-│   ├── prompt/                # 提示词组装
-│   │   ├── assembler.py         #   系统提示词构建 + 缓存
-│   │   ├── cache.py             #   提示词缓存
-│   │   ├── context.py           #   提示词上下文
-│   │   └── system_context.py    #   三层提示词（框架/用户/环境）
-│   ├── query/                 # 查询循环
-│   │   ├── loop.py              #   核心：思考-行动循环
-│   │   ├── recovery.py          #   空/截断响应恢复
-│   │   ├── result.py            #   查询结果
-│   │   └── state.py             #   运行状态
-│   ├── session/               # 会话管理
-│   │   ├── commands.py          #   /skills 命令处理
-│   │   ├── engine.py            #   SessionEngine 编排器
-│   │   ├── state.py             #   会话状态
-│   │   ├── store.py             #   消息存储
-│   │   ├── subagent.py          #   子代理运行时
-│   │   └── view_builder.py      #   消息视图构建
-│   ├── shared/                # 共享类型
-│   │   ├── config.py            #   环境变量配置
-│   │   ├── env_loader.py        #   .env 文件加载
-│   │   ├── interfaces.py        #   Protocol 定义（LLM/Renderer/Context）
-│   │   ├── protocol.py          #   消息协议
-│   │   ├── run_options.py       #   运行显示选项
-│   │   └── types.py             #   UsageDelta / MessageBatch
-│   ├── skills/                # Skills 系统
-│   │   ├── models.py            #   Skill 数据模型
-│   │   ├── registry.py          #   Skill 发现与加载
-│   │   └── runtime.py           #   Skill 内联注入
-│   ├── tools/                 # 工具系统
-│   │   ├── __init__.py          #   ToolRegistry + 自动发现
-│   │   ├── context.py           #   ToolUseContext / ToolResult
-│   │   ├── runtime.py           #   ToolExecutorRuntime 调度器
-│   │   └── builtin/             #   内置工具（每个文件一个）
-│   │       ├── bash.py
-│   │       ├── read_file.py
-│   │       ├── write_file.py
-│   │       ├── edit_file.py
-│   │       ├── find.py
-│   │       ├── todo.py
-│   │       └── skill.py
-│   └── ui/                    # 终端渲染
-│       └── renderer.py          #   RichRenderer + QuietRenderer
-├── tests/                     # 测试
-├── docs/                      # 设计文档
-│   ├── agent_loop/              #   Agent Loop 设计笔记
-│   ├── stage-4-agent-design-intent.md  #   阶段 4 教学型讲解
-│   ├── specs/                   #   功能设计文档
-│   └── tools/                   #   工具系统设计笔记
-└── .harness/                  # 用户定制
-    ├── context/                 #   AI 行为定制（identity.md, style.md, rules.md）
-    └── skills/                  #   Skills 知识包
+│   ├── llm/                  # API 客户端、协议归一化、响应模型
+│   ├── policy/               # 策略框架（max_turns、todo stale）
+│   ├── prompt/               # system prompt 组装与缓存
+│   ├── query/                # QueryLoop、RunState、reducers、recovery
+│   ├── session/              # SessionEngine、SessionState、ViewBuilder
+│   ├── skills/               # Skill 注册与加载
+│   ├── tools/                # ToolExecutorRuntime + builtin 工具
+│   └── ui/                   # RichRenderer
+├── docs/
+├── tests/
+└── .harness/
+    ├── context/              # identity.md, style.md, rules.md
+    └── skills/               # 用户自定义 skill
 ```
 
 ## 配置
 
-所有配置通过环境变量（`.env` 文件）：
-
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ANTHROPIC_API_KEY` | （必填） | API Key |
-| `ANTHROPIC_MODEL` | `kimi-k2.5` | 模型 ID |
-| `ANTHROPIC_BASE_URL` | （空） | 可选，用于兼容 Anthropic 协议的服务 |
-| `LLM_MAX_TOKENS` | `8192` | 单次请求最大输出 token |
-| `LLM_ENABLE_THINKING` | `true` | 启用推理模式 |
-| `LLM_SHOW_THINKING` | `true` | 显示推理过程 |
-| `BASH_TIMEOUT` | `120` | bash 命令超时（秒） |
-| `AGENT_MAX_TURNS` | `300` | 工具调用轮次上限 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | 空 | API Key |
+| `ANTHROPIC_MODEL` | `kimi-k2.5` | 模型名 |
+| `ANTHROPIC_BASE_URL` | `https://api.kimi.com/coding/` | 兼容 Anthropic Messages API 的地址 |
+| `LLM_MAX_TOKENS` | `8192` | 单次输出 token 上限 |
+| `LLM_THINKING_MODE` | `auto` | `auto / enabled / disabled` |
+| `AGENT_MAX_TURNS` | `300` | 单次 query 最大工具轮次 |
 
-### 支持的模型
+其余配置见 `core/shared/config.py`。
 
-只要 API 兼容 Anthropic Messages 协议就能用：
+## 怎么读这个仓库
 
-| 模型 | Provider | 说明 |
-|------|----------|------|
-| claude-sonnet-4-6 | Anthropic | 推荐模型 |
-| claude-opus-4-6 | Anthropic | 高能力模型 |
-| kimi-k2.5 | Moonshot | 默认模型，支持 extended thinking |
+建议先分两层来读：
 
-切换模型只需修改 `.env` 中的 `ANTHROPIC_MODEL` 和 `ANTHROPIC_BASE_URL`。
+- **第一层：核心代码路径** — 直接对照代码，理解一条请求从入口到退出
+- **第二层：伴随文档路径** — 补齐“从 0 到 1 做一个 Agent”时最容易缺的桥梁知识
 
-### 自定义 AI 行为
+如果你是第一次接触这个仓库，建议先读 [docs/features/00-learning-path.md](docs/features/00-learning-path.md)。
 
-编辑 `.harness/context/` 下的文件来定制 Agent：
+### 第一层：核心代码路径
 
-- `identity.md` — 定义 AI 身份（如"你是一个 Python 专家"）
-- `style.md` — 定义沟通风格（如"回答简洁，用代码说话"）
-- `rules.md` — 额外规则（如"不要修改配置文件"）
+建议按以下顺序，每个文件都在 200 行以内：
 
-## 扩展指南
+**第一组：主路径** — 理解一条用户输入从头到尾走了什么
 
-### 添加新工具
+1. [`01_agent_loop.py`](01_agent_loop.py) — REPL + 依赖装配（~110 行）
+2. [`core/session/engine.py`](core/session/engine.py) — 会话协调者（~155 行）
+3. [`core/query/loop.py`](core/query/loop.py) — think-act 主循环（~350 行，核心）
 
-在 `core/tools/builtin/` 下新建一个 `.py` 文件，框架自动发现并注册。
+**第二组：模型输入** — 理解模型"看到"的到底是什么
 
-```python
-# core/tools/builtin/my_tool.py
-from __future__ import annotations
-from typing import Any
-from ..context import ToolResult, ToolUseContext
+4. [`core/session/view_builder.py`](core/session/view_builder.py) — transcript 截取 + thinking 清理
+5. [`core/prompt/assembler.py`](core/prompt/assembler.py) — system prompt 三层组装
 
-SCHEMA: dict[str, Any] = {
-    "name": "my_tool",
-    "description": "这个工具做什么",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "input": {"type": "string", "description": "输入参数"},
-        },
-        "required": ["input"],
-    },
-}
+**第三组：协议与工具** — 理解数据怎么进出模型
 
-READONLY = True  # 只读工具可以并行执行
+6. [`core/llm/protocol.py`](core/llm/protocol.py) — 内部格式 → Anthropic 格式转换
+7. [`core/query/reducers.py`](core/query/reducers.py) — 唯一状态写入口
+8. [`core/tools/runtime.py`](core/tools/runtime.py) — 工具分批执行（并行/串行）
 
-def handle(args: dict[str, Any], context: ToolUseContext) -> ToolResult:
-    result = do_something(args["input"])
-    return ToolResult(output=result, success=True)
-```
+### 第二层：伴随文档路径
 
-就这么简单。框架启动时会自动扫描 `builtin/` 目录并注册所有工具。
+当你已经能沿着代码路径走一遍以后，建议继续读这 5 篇：
 
-### 创建 Skill
+1. [docs/features/08-request-lifecycle-walkthrough.md](docs/features/08-request-lifecycle-walkthrough.md) — 一次真实请求如何跑完整个运行时
+2. [docs/features/09-state-assembled-runtime.md](docs/features/09-state-assembled-runtime.md) — 为什么状态才是运行时真相
+3. [docs/features/10-anthropic-protocol-boundary.md](docs/features/10-anthropic-protocol-boundary.md) — 内部消息结构和 Anthropic 协议边界
+4. [docs/features/11-extension-playbook.md](docs/features/11-extension-playbook.md) — 项目组同事要扩展能力时从哪里动手
+5. [docs/features/12-runtime-invariants.md](docs/features/12-runtime-invariants.md) — 哪些运行时约束不能破坏
 
-在 `.harness/skills/` 下新建目录：
+`docs/features` 现在既包含按组件拆开的功能说明，也包含这组面向入门和扩展的伴随文档。
 
-```
-.harness/skills/my-skill/
-├── SKILL.md          # 必需：YAML 前置元数据 + Markdown 正文
-└── references/       # 可选：参考文件
-    └── guide.md
-```
-
-`SKILL.md` 格式：
-
-```markdown
----
-name: my-skill
-description: 这个 Skill 做什么
-when-to-use: 什么时候应该使用
----
-
-# Skill 正文
-
-这里写具体的指令和知识...
-```
-
-## 学习路线
-
-建议按以下顺序阅读源码：
-
-1. **`core/shared/config.py`** — 14 行，了解配置从哪来
-2. **`core/shared/interfaces.py`** — Protocol 定义，理解各组件的接口契约
-3. **`core/tools/__init__.py`** — ToolRegistry 和工具自动发现机制
-4. **`core/tools/context.py`** — ToolResult、ToolUseContext 等核心类型
-5. **`core/llm/anthropic_client.py`** — LLM 调用封装和 thinking 支持
-6. **`core/query/loop.py`** — 核心！思考-行动循环的完整逻辑
-7. **`core/session/engine.py`** — SessionEngine 编排器，看依赖如何组装
-8. **`01_agent_loop.py`** — 入口，REPL 启动流程
-
-`docs/` 目录下有详细的设计文档，记录了每个设计决策的原因。
-
-推荐先读这两篇：
-
-- [`docs/stage-4-agent-design-intent.md`](docs/stage-4-agent-design-intent.md) — 面向初学者理解阶段 4：control plane、policy、skills 如何协作
-- [`docs/architecture-evolution-deep-dive.md`](docs/architecture-evolution-deep-dive.md) — 从整体演进视角看四个架构阶段如何一步步形成今天的结构
-
-## 运行测试
-
-```bash
-python -m pytest tests/ -v
-```
+完整架构文档：[docs/architecture-current-runtime.md](docs/architecture-current-runtime.md)
 
 ## License
 

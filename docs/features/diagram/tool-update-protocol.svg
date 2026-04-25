@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1260 980">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&amp;display=swap');
+      text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .title { fill: #e2e8f0; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .node-text { fill: #cbd5e1; font-size: 10px; }
+      .label { fill: #fbbf24; font-size: 9px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="1260" height="980" fill="#0f172a"/>
+  <rect width="1260" height="980" fill="url(#grid)"/>
+
+  <text x="36" y="42" class="title">Tool Update 协议与 reducer 生效图</text>
+  <text x="36" y="64" class="subtitle">对应代码：core/tools/context.py / core/tools/runtime.py / core/query/reducers.py</text>
+
+  <rect x="90" y="160" width="220" height="148" rx="12" fill="#0f172a"/>
+  <rect x="90" y="160" width="220" height="148" rx="12" fill="rgba(8,51,68,0.36)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="200" y="194" text-anchor="middle" class="node-title">tool handler</text>
+  <text x="200" y="218" text-anchor="middle" class="node-text">read_file / skill / todo / write_file ...</text>
+  <text x="200" y="240" text-anchor="middle" class="node-text">不能直接改 SessionState / RunState</text>
+  <text x="200" y="262" text-anchor="middle" class="node-text">只能返回 ToolInvocationOutcome</text>
+
+  <rect x="370" y="128" width="300" height="212" rx="12" fill="#0f172a"/>
+  <rect x="370" y="128" width="300" height="212" rx="12" fill="rgba(30,41,59,0.56)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="520" y="162" text-anchor="middle" class="node-title">ToolInvocationOutcome</text>
+  <text x="520" y="190" text-anchor="middle" class="node-text">messages：给下一轮模型看的结果</text>
+  <text x="520" y="214" text-anchor="middle" class="node-text">session_updates：跨 query 的长期状态</text>
+  <text x="520" y="238" text-anchor="middle" class="node-text">run_updates：当前 query 的控制状态</text>
+  <text x="520" y="262" text-anchor="middle" class="node-text">status / error：给 loop 的控制语义</text>
+  <text x="520" y="296" text-anchor="middle" class="node-text">同一个工具结果里，这四类信息被显式拆开</text>
+
+  <rect x="760" y="128" width="360" height="212" rx="12" fill="#0f172a"/>
+  <rect x="760" y="128" width="360" height="212" rx="12" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="940" y="162" text-anchor="middle" class="node-title">ToolExecutorRuntime._apply_updates()</text>
+  <text x="940" y="190" text-anchor="middle" class="node-text">串行批次：每个工具执行完就立即应用</text>
+  <text x="940" y="214" text-anchor="middle" class="node-text">并行批次：等都完成后，按原始调用顺序合并</text>
+  <text x="940" y="238" text-anchor="middle" class="node-text">顺序固定，结果才稳定可复现</text>
+  <text x="940" y="272" text-anchor="middle" class="node-text">先 run_updates，后 session_updates</text>
+
+  <rect x="120" y="480" width="260" height="170" rx="12" fill="#0f172a"/>
+  <rect x="120" y="480" width="260" height="170" rx="12" fill="rgba(120,53,15,0.30)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="250" y="514" text-anchor="middle" class="node-title">apply_run_update()</text>
+  <text x="250" y="542" text-anchor="middle" class="node-text">MARK_FILE_MODIFIED</text>
+  <text x="250" y="564" text-anchor="middle" class="node-text">NARROW_ALLOWED_TOOLS</text>
+  <text x="250" y="586" text-anchor="middle" class="node-text">SET_MODEL_OVERRIDE / SET_EFFORT_OVERRIDE</text>
+  <text x="250" y="608" text-anchor="middle" class="node-text">RESET_TODO_TURN_COUNTER</text>
+  <text x="250" y="634" text-anchor="middle" class="node-text">作用对象：RunState</text>
+
+  <rect x="470" y="480" width="320" height="170" rx="12" fill="#0f172a"/>
+  <rect x="470" y="480" width="320" height="170" rx="12" fill="rgba(76,29,149,0.30)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="630" y="514" text-anchor="middle" class="node-title">apply_session_update()</text>
+  <text x="630" y="542" text-anchor="middle" class="node-text">INVOKE_SKILL / APPEND_SKILL_EVENT</text>
+  <text x="630" y="564" text-anchor="middle" class="node-text">SET_TODO_ITEMS</text>
+  <text x="630" y="586" text-anchor="middle" class="node-text">UPSERT_FILE_STATE / INVALIDATE_FILE_STATE</text>
+  <text x="630" y="612" text-anchor="middle" class="node-text">作用对象：SessionState</text>
+
+  <rect x="880" y="480" width="260" height="170" rx="12" fill="#0f172a"/>
+  <rect x="880" y="480" width="260" height="170" rx="12" fill="rgba(59,130,246,0.30)" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="1010" y="514" text-anchor="middle" class="node-title">回到 QueryLoop</text>
+  <text x="1010" y="542" text-anchor="middle" class="node-text">messages 追加回 transcript</text>
+  <text x="1010" y="564" text-anchor="middle" class="node-text">run/session state 已是新状态</text>
+  <text x="1010" y="586" text-anchor="middle" class="node-text">下一轮 build view 重新读取它们</text>
+
+  <rect x="90" y="754" width="1050" height="110" rx="14" fill="rgba(15,23,42,0.92)" stroke="#334155" stroke-width="1.2"/>
+  <text x="615" y="790" text-anchor="middle" class="node-title">为什么必须走结构化 update 协议</text>
+  <text x="615" y="818" text-anchor="middle" class="node-text">1. 工具副作用入口统一，测试能断言“工具声明了什么”</text>
+  <text x="615" y="842" text-anchor="middle" class="node-text">2. 并行只读批次不会把共享状态写乱</text>
+  <text x="615" y="866" text-anchor="middle" class="node-text">3. 安全语义能稳定叠加，例如 NARROW_ALLOWED_TOOLS 只能收窄、不能回滚</text>
+
+  <line x1="310" y1="234" x2="370" y2="234" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="340" y="224" class="label">return outcome</text>
+  <line x1="670" y1="234" x2="760" y2="234" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="714" y="224" class="label">runtime 消费</text>
+  <line x1="860" y1="340" x2="250" y2="480" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="540" y="392" class="label">run_updates</text>
+  <line x1="920" y1="340" x2="630" y2="480" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="760" y="396" class="label">session_updates</text>
+  <line x1="1020" y1="340" x2="1010" y2="480" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="1032" y="414" class="label">messages</text>
+  <line x1="380" y1="566" x2="470" y2="566" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="424" y="554" class="label">先 run，再 session</text>
+</svg>

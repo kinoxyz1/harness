@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1420">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&amp;display=swap');
+      text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .title { fill: #e2e8f0; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .node-text { fill: #cbd5e1; font-size: 10px; }
+      .label { fill: #fbbf24; font-size: 9px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="980" height="1420" fill="#0f172a"/>
+  <rect width="980" height="1420" fill="url(#grid)"/>
+
+  <text x="36" y="42" class="title">工具批次执行流程图</text>
+  <text x="36" y="64" class="subtitle">对应代码：core/query/loop.py + core/tools/runtime.py</text>
+
+  <rect x="360" y="94" width="260" height="54" rx="26" fill="#0f172a"/>
+  <rect x="360" y="94" width="260" height="54" rx="26" fill="rgba(59,130,246,0.30)" stroke="#60a5fa" stroke-width="1.6"/>
+  <text x="490" y="126" text-anchor="middle" class="node-title">QueryLoop 收到 model_resp</text>
+
+  <rect x="320" y="194" width="340" height="82" rx="10" fill="#0f172a"/>
+  <rect x="320" y="194" width="340" height="82" rx="10" fill="rgba(8,51,68,0.36)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="490" y="224" text-anchor="middle" class="node-title">先把 assistant 消息写回 transcript</text>
+  <text x="490" y="246" text-anchor="middle" class="node-text">store.append(model_resp.to_message())</text>
+
+  <g transform="translate(490, 342)">
+    <polygon points="0,-42 86,0 0,42 -86,0" fill="#0f172a"/>
+    <polygon points="0,-42 86,0 0,42 -86,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">有</text>
+    <text y="16" text-anchor="middle" class="node-title">tool_calls？</text>
+  </g>
+
+  <rect x="676" y="304" width="214" height="76" rx="10" fill="#0f172a"/>
+  <rect x="676" y="304" width="214" height="76" rx="10" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="783" y="334" text-anchor="middle" class="node-title">没有</text>
+  <text x="783" y="356" text-anchor="middle" class="node-text">转向文本分支或 recovery</text>
+
+  <rect x="330" y="430" width="320" height="78" rx="10" fill="#0f172a"/>
+  <rect x="330" y="430" width="320" height="78" rx="10" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="490" y="460" text-anchor="middle" class="node-title">_parse_tool_calls()</text>
+  <text x="490" y="482" text-anchor="middle" class="node-text">dict / ToolCall → 统一成 ToolCall 列表</text>
+
+  <rect x="320" y="552" width="340" height="84" rx="10" fill="#0f172a"/>
+  <rect x="320" y="552" width="340" height="84" rx="10" fill="rgba(120,53,15,0.28)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="490" y="582" text-anchor="middle" class="node-title">ToolExecutorRuntime._partition()</text>
+  <text x="490" y="604" text-anchor="middle" class="node-text">连续只读调用合成并行批次</text>
+  <text x="490" y="622" text-anchor="middle" class="node-text">写入调用独占成串行批次</text>
+
+  <rect x="110" y="698" width="300" height="120" rx="12" fill="#0f172a"/>
+  <rect x="110" y="698" width="300" height="120" rx="12" fill="rgba(8,51,68,0.34)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="260" y="730" text-anchor="middle" class="node-title">并行批次</text>
+  <text x="260" y="754" text-anchor="middle" class="node-text">_execute_parallel()</text>
+  <text x="260" y="776" text-anchor="middle" class="node-text">先检查 allowed_tools_override</text>
+  <text x="260" y="798" text-anchor="middle" class="node-text">ThreadPool 执行多个只读 handler</text>
+
+  <rect x="570" y="698" width="300" height="120" rx="12" fill="#0f172a"/>
+  <rect x="570" y="698" width="300" height="120" rx="12" fill="rgba(136,19,55,0.34)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="720" y="730" text-anchor="middle" class="node-title">串行批次</text>
+  <text x="720" y="754" text-anchor="middle" class="node-text">_execute_serial()</text>
+  <text x="720" y="776" text-anchor="middle" class="node-text">每个写工具独占执行</text>
+  <text x="720" y="798" text-anchor="middle" class="node-text">每一步之后立即应用 updates</text>
+
+  <rect x="300" y="878" width="380" height="100" rx="12" fill="#0f172a"/>
+  <rect x="300" y="878" width="380" height="100" rx="12" fill="rgba(30,41,59,0.56)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="490" y="910" text-anchor="middle" class="node-title">每个工具返回 ToolInvocationOutcome</text>
+  <text x="490" y="934" text-anchor="middle" class="node-text">messages + session_updates + run_updates + status</text>
+  <text x="490" y="956" text-anchor="middle" class="node-text">工具结果是“声明式回写”，不是直接改状态</text>
+
+  <rect x="300" y="1026" width="380" height="98" rx="12" fill="#0f172a"/>
+  <rect x="300" y="1026" width="380" height="98" rx="12" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="490" y="1058" text-anchor="middle" class="node-title">_apply_updates()</text>
+  <text x="490" y="1082" text-anchor="middle" class="node-text">先 apply_run_update()</text>
+  <text x="490" y="1102" text-anchor="middle" class="node-text">再 apply_session_update()</text>
+
+  <rect x="300" y="1170" width="380" height="90" rx="12" fill="#0f172a"/>
+  <rect x="300" y="1170" width="380" height="90" rx="12" fill="rgba(76,29,149,0.30)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="490" y="1202" text-anchor="middle" class="node-title">ToolBatchResult 回到 QueryLoop</text>
+  <text x="490" y="1224" text-anchor="middle" class="node-text">store.extend(batch.messages)</text>
+  <text x="490" y="1244" text-anchor="middle" class="node-text">tool result 重新写回 transcript</text>
+
+  <rect x="300" y="1300" width="380" height="66" rx="12" fill="#0f172a"/>
+  <rect x="300" y="1300" width="380" height="66" rx="12" fill="rgba(59,130,246,0.28)" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="490" y="1330" text-anchor="middle" class="node-title">更新计数、transition、stop policy</text>
+  <text x="490" y="1352" text-anchor="middle" class="node-text">然后 continue 到下一轮 build view</text>
+
+  <line x1="490" y1="148" x2="490" y2="194" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="276" x2="490" y2="300" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="576" y1="342" x2="676" y2="342" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="620" y="330" class="label">否</text>
+  <line x1="490" y1="384" x2="490" y2="430" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="502" y="406" class="label">是</text>
+  <line x1="490" y1="508" x2="490" y2="552" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="636" x2="490" y2="664" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="490" y1="664" x2="260" y2="664" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="260" y1="664" x2="260" y2="698" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="664" x2="720" y2="664" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="720" y1="664" x2="720" y2="698" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="260" y1="818" x2="260" y2="928" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="260" y1="928" x2="300" y2="928" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="720" y1="818" x2="720" y2="928" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="720" y1="928" x2="680" y2="928" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="978" x2="490" y2="1026" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="1124" x2="490" y2="1170" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="490" y1="1260" x2="490" y2="1300" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="62" y="1310" width="180" height="64" rx="10" fill="rgba(15,23,42,0.92)" stroke="#334155" stroke-width="1"/>
+  <text x="152" y="1336" text-anchor="middle" class="node-text">只读并行不是“并发乱写”</text>
+  <text x="152" y="1356" text-anchor="middle" class="node-text">因为只有只读批次才能走这里</text>
+
+  <rect x="728" y="1310" width="198" height="64" rx="10" fill="rgba(15,23,42,0.92)" stroke="#334155" stroke-width="1"/>
+  <text x="827" y="1336" text-anchor="middle" class="node-text">写工具立即应用 updates</text>
+  <text x="827" y="1356" text-anchor="middle" class="node-text">保证后续工具能看到前序副作用</text>
+</svg>

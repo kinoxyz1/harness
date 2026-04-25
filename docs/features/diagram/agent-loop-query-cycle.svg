@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1540">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&amp;display=swap');
+      text { font-family: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .title { fill: #e2e8f0; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+      .node-text { fill: #cbd5e1; font-size: 10px; }
+      .label { fill: #fbbf24; font-size: 9px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="1180" height="1540" fill="#0f172a"/>
+  <rect width="1180" height="1540" fill="url(#grid)"/>
+
+  <text x="36" y="42" class="title">单次 Query 完整循环图</text>
+  <text x="36" y="64" class="subtitle">对应代码：core/query/loop.py / core/session/view_builder.py / core/tools/runtime.py / core/query/recovery.py</text>
+
+  <rect x="420" y="92" width="340" height="54" rx="26" fill="#0f172a"/>
+  <rect x="420" y="92" width="340" height="54" rx="26" fill="rgba(59,130,246,0.30)" stroke="#60a5fa" stroke-width="1.6"/>
+  <text x="590" y="125" text-anchor="middle" class="node-title">SessionEngine 把用户消息送入 QueryLoop.run()</text>
+
+  <rect x="400" y="188" width="380" height="86" rx="10" fill="#0f172a"/>
+  <rect x="400" y="188" width="380" height="86" rx="10" fill="rgba(120,53,15,0.28)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="590" y="220" text-anchor="middle" class="node-title">state = RunState()</text>
+  <text x="590" y="242" text-anchor="middle" class="node-text">本次 query 的控制状态从这里开始</text>
+  <text x="590" y="262" text-anchor="middle" class="node-text">turn_count / transition / stop_reason 都是 run-scoped</text>
+
+  <rect x="400" y="318" width="380" height="88" rx="10" fill="#0f172a"/>
+  <rect x="400" y="318" width="380" height="88" rx="10" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="590" y="350" text-anchor="middle" class="node-title">maintenance + policy</text>
+  <text x="590" y="372" text-anchor="middle" class="node-text">collect_runtime_maintenance_updates()</text>
+  <text x="590" y="392" text-anchor="middle" class="node-text">before_model_call() 注入 stale reminder 等控制消息</text>
+
+  <rect x="400" y="448" width="380" height="96" rx="10" fill="#0f172a"/>
+  <rect x="400" y="448" width="380" height="96" rx="10" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="590" y="480" text-anchor="middle" class="node-title">MessageViewBuilder.build()</text>
+  <text x="590" y="502" text-anchor="middle" class="node-text">system = stable + runtime + overlay</text>
+  <text x="590" y="522" text-anchor="middle" class="node-text">messages = transcript slice，tools = 本轮允许的 schema</text>
+
+  <rect x="400" y="586" width="380" height="82" rx="10" fill="#0f172a"/>
+  <rect x="400" y="586" width="380" height="82" rx="10" fill="rgba(76,29,149,0.30)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="590" y="618" text-anchor="middle" class="node-title">ModelGateway.call_once()</text>
+  <text x="590" y="640" text-anchor="middle" class="node-text">stop_reason = max_turns 时不再传 tools</text>
+
+  <rect x="400" y="708" width="380" height="74" rx="10" fill="#0f172a"/>
+  <rect x="400" y="708" width="380" height="74" rx="10" fill="rgba(30,41,59,0.56)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="590" y="738" text-anchor="middle" class="node-title">先写回 assistant transcript</text>
+  <text x="590" y="760" text-anchor="middle" class="node-text">普通文本、tool_calls、reasoning 都先进入 conversation_messages</text>
+
+  <g transform="translate(590, 852)">
+    <polygon points="0,-42 92,0 0,42 -92,0" fill="#0f172a"/>
+    <polygon points="0,-42 92,0 0,42 -92,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">模型要调</text>
+    <text y="16" text-anchor="middle" class="node-title">工具？</text>
+  </g>
+
+  <rect x="90" y="934" width="340" height="136" rx="12" fill="#0f172a"/>
+  <rect x="90" y="934" width="340" height="136" rx="12" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="260" y="968" text-anchor="middle" class="node-title">是：工具分支</text>
+  <text x="260" y="992" text-anchor="middle" class="node-text">_parse_tool_calls() → ToolExecutorRuntime.execute_batch()</text>
+  <text x="260" y="1014" text-anchor="middle" class="node-text">store.extend(tool messages)</text>
+  <text x="260" y="1036" text-anchor="middle" class="node-text">turn_count += 1 / tool_calls_executed += N</text>
+  <text x="260" y="1058" text-anchor="middle" class="node-text">apply_transition(NEXT_TURN)</text>
+
+  <g transform="translate(260, 1150)">
+    <polygon points="0,-40 96,0 0,40 -96,0" fill="#0f172a"/>
+    <polygon points="0,-40 96,0 0,40 -96,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">policy 要求</text>
+    <text y="16" text-anchor="middle" class="node-title">stop？</text>
+  </g>
+
+  <rect x="62" y="1240" width="396" height="128" rx="12" fill="#0f172a"/>
+  <rect x="62" y="1240" width="396" height="128" rx="12" fill="rgba(136,19,55,0.34)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="260" y="1272" text-anchor="middle" class="node-title">max_turns 收尾模式</text>
+  <text x="260" y="1296" text-anchor="middle" class="node-text">state.stop_reason = "max_turns"</text>
+  <text x="260" y="1318" text-anchor="middle" class="node-text">append 用户消息：请基于当前信息给最终回复</text>
+  <text x="260" y="1340" text-anchor="middle" class="node-text">apply_transition(MAX_TURNS_RECOVERY) 后 continue</text>
+
+  <rect x="62" y="1406" width="396" height="66" rx="12" fill="#0f172a"/>
+  <rect x="62" y="1406" width="396" height="66" rx="12" fill="rgba(59,130,246,0.28)" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="260" y="1436" text-anchor="middle" class="node-title">正常工具轮</text>
+  <text x="260" y="1458" text-anchor="middle" class="node-text">continue 到下一轮，再次 build view</text>
+
+  <rect x="750" y="934" width="340" height="94" rx="12" fill="#0f172a"/>
+  <rect x="750" y="934" width="340" height="94" rx="12" fill="rgba(8,51,68,0.36)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="920" y="968" text-anchor="middle" class="node-title">否：看最终文本</text>
+  <text x="920" y="992" text-anchor="middle" class="node-text">有 final text → 返回 QueryResult(COMPLETED 或 MAX_TURNS)</text>
+
+  <g transform="translate(920, 1106)">
+    <polygon points="0,-40 96,0 0,40 -96,0" fill="#0f172a"/>
+    <polygon points="0,-40 96,0 0,40 -96,0" fill="rgba(120,53,15,0.30)" stroke="#fbbf24" stroke-width="1.6"/>
+    <text y="-4" text-anchor="middle" class="node-title">有 final</text>
+    <text y="16" text-anchor="middle" class="node-title">text？</text>
+  </g>
+
+  <rect x="772" y="1198" width="296" height="76" rx="12" fill="#0f172a"/>
+  <rect x="772" y="1198" width="296" height="76" rx="12" fill="rgba(6,78,59,0.34)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="920" y="1230" text-anchor="middle" class="node-title">返回 QueryResult</text>
+  <text x="920" y="1252" text-anchor="middle" class="node-text">final_output / stop_reason / turns_used</text>
+
+  <rect x="772" y="1320" width="296" height="98" rx="12" fill="#0f172a"/>
+  <rect x="772" y="1320" width="296" height="98" rx="12" fill="rgba(76,29,149,0.30)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="920" y="1352" text-anchor="middle" class="node-title">RecoveryManager.handle()</text>
+  <text x="920" y="1374" text-anchor="middle" class="node-text">length → 注入“请继续输出。”</text>
+  <text x="920" y="1396" text-anchor="middle" class="node-text">空响应 → 注入“请直接给出最终答复。”</text>
+
+  <path d="M 920 1418 L 1120 1418 L 1120 362 L 780 362" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="8 5" marker-end="url(#arrow)"/>
+  <text x="1090" y="898" transform="rotate(90 1090 898)" class="label">恢复分支注入 follow-up 消息后继续下一轮</text>
+
+  <rect x="796" y="164" width="300" height="104" rx="12" fill="rgba(15,23,42,0.92)" stroke="#334155" stroke-width="1"/>
+  <text x="946" y="196" text-anchor="middle" class="node-title" style="font-size:12px">最重要的边界</text>
+  <text x="946" y="220" text-anchor="middle" class="node-text">一次 query 不是“把历史原样喂给模型直到结束”</text>
+  <text x="946" y="242" text-anchor="middle" class="node-text">而是每轮从显式状态重建视图，再决定下一步</text>
+
+  <line x1="590" y1="146" x2="590" y2="188" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="274" x2="590" y2="318" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="406" x2="590" y2="448" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="544" x2="590" y2="586" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="668" x2="590" y2="708" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="782" x2="590" y2="810" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="498" y1="852" x2="430" y2="852" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="430" y1="852" x2="260" y2="852" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="260" y1="852" x2="260" y2="934" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="350" y="840" class="label">是</text>
+  <line x1="682" y1="852" x2="750" y2="852" stroke="#94a3b8" stroke-width="2"/>
+  <line x1="920" y1="852" x2="920" y2="934" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="706" y="840" class="label">否</text>
+  <line x1="260" y1="1070" x2="260" y2="1110" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="260" y1="1190" x2="260" y2="1240" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="282" y="1214" class="label">是</text>
+  <line x1="260" y1="1190" x2="260" y2="1406" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="282" y="1394" class="label">否</text>
+  <line x1="920" y1="1028" x2="920" y2="1066" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="920" y1="1146" x2="920" y2="1198" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="942" y="1170" class="label">是</text>
+  <line x1="920" y1="1146" x2="920" y2="1320" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="942" y="1308" class="label">否</text>
+</svg>
