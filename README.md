@@ -133,8 +133,6 @@ harness/
 
 `docs/features` 现在既包含按组件拆开的功能说明，也包含这组面向入门和扩展的伴随文档。
 
-完整架构文档：[docs/architecture-current-runtime.md](docs/architecture-current-runtime.md)
-
 ## License
 
 MIT
