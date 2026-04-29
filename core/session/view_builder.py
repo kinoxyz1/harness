@@ -198,6 +198,7 @@ class MessageViewBuilder:
         working_dir: str,
         project_root: str | None = None,
         transcript_char_budget: int | None = None,
+        transcript_messages: list[dict[str, Any]] | None = None,
     ) -> ModelInputView:
         """从 SessionState 构建 ModelInputView。
 
@@ -211,7 +212,8 @@ class MessageViewBuilder:
         4. 过滤工具列表 — 根据 allowed_tools_override 限制可用工具
         """
         budget = transcript_char_budget or 24_000
-        transcript_slice = self._select_transcript_slice(state.conversation_messages, char_budget=budget)
+        source_messages = transcript_messages if transcript_messages is not None else state.conversation_messages
+        transcript_slice = self._select_transcript_slice(source_messages, char_budget=budget)
         transcript_slice = self._strip_old_thinking(transcript_slice, keep_last=2)
         system_parts = [
             prompt_assembler.build_stable_context(state, project_root=project_root),

@@ -164,3 +164,20 @@ def test_build_preserves_reasoning_for_older_assistant_tool_call_messages(tmp_pa
         "thinking": "Need to load the skill first.",
         "signature": "sig-skill",
     }
+
+
+def test_build_uses_explicit_transcript_messages_when_supplied(tmp_path: Path) -> None:
+    state = SessionState(conversation_messages=[{"role": "user", "content": "original"}])
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+        transcript_messages=[{"role": "user", "content": "prepared"}],
+    )
+
+    assert view.messages == [{"role": "user", "content": "prepared"}]

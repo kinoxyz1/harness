@@ -17,6 +17,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.session.pairing_repair import repair_tool_result_pairs
+
+
+_COMPACT_META_ROLE_MAP = {
+    "meta_compact_boundary": "user",
+    "meta_compact_summary": "assistant",
+    "meta_runtime_restore": "user",
+}
+
 
 def normalize_messages(
     messages: list[dict[str, Any]],
@@ -49,11 +58,13 @@ def normalize_messages(
             converted.append(_convert_user(msg))
         elif role == "assistant":
             converted.append(_convert_assistant(msg))
+        elif role in _COMPACT_META_ROLE_MAP:
+            converted.append(_convert_compact_meta(msg, normalized_role=_COMPACT_META_ROLE_MAP[role]))
         elif role == "tool":
             converted.append(msg)  # 保留原始，后续处理
 
-    # 3. 补齐未闭合的 tool_use
-    converted = _pair_tool_results(converted)
+    # 3. 修复 tool_use/tool_result 配对与重复。
+    converted = repair_tool_result_pairs(converted)
 
     # 4. 把连续 tool 消息合并为 user + tool_result blocks
     converted = _merge_tool_results(converted)
@@ -105,45 +116,17 @@ def _convert_assistant(msg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pair_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """确保每个 tool_use block 都有匹配的 tool_result。
-
-    为缺失的 tool_use 插入 (cancelled) 占位 tool 消息。
-    仅在列表中存在至少一条 tool 消息时才补齐（否则视为纯转换场景）。
-    """
-    # 收集已有 tool_result 的 ID，同时判断是否存在 tool 消息
-    has_tool_messages = False
-    paired_ids: set[str] = set()
-    for msg in messages:
-        if msg.get("role") == "tool":
-            has_tool_messages = True
-            tc_id = msg.get("tool_call_id")
-            if tc_id:
-                paired_ids.add(tc_id)
-
-    if not has_tool_messages:
-        return messages
-
-    insertions: list[tuple[int, dict[str, Any]]] = []
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                tc_id = block.get("id")
-                if tc_id and tc_id not in paired_ids:
-                    insertions.append((
-                        i + 1 + len(insertions),
-                        {"role": "tool", "tool_call_id": tc_id, "content": "(cancelled)"},
-                    ))
-
-    for idx, placeholder in insertions:
-        messages.insert(idx, placeholder)
-
-    return messages
+def _convert_compact_meta(
+    msg: dict[str, Any], *, normalized_role: str
+) -> dict[str, Any]:
+    """Normalize internal compact meta roles into provider-safe transcript roles."""
+    content = msg.get("content", "")
+    if normalized_role == "assistant":
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": content}] if content else "",
+        }
+    return {"role": normalized_role, "content": content}
 
 
 def _merge_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

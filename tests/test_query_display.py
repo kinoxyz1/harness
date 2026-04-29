@@ -46,8 +46,19 @@ class FakeRenderer:
 
 
 class FakeViewBuilder:
-    def build(self, state: SessionState, *, run_state=None, prompt_assembler=None, working_dir=".", project_root=None, transcript_char_budget=None) -> ModelInputView:
-        return ModelInputView(system="SYSTEM", messages=list(state.conversation_messages), tools=None)
+    def build(
+        self,
+        state: SessionState,
+        *,
+        run_state=None,
+        prompt_assembler=None,
+        working_dir=".",
+        project_root=None,
+        transcript_char_budget=None,
+        transcript_messages=None,
+    ) -> ModelInputView:
+        source = transcript_messages if transcript_messages is not None else state.conversation_messages
+        return ModelInputView(system="SYSTEM", messages=list(source), tools=None)
 
 
 class FakeModelGateway:
@@ -102,6 +113,13 @@ class FakeRecovery:
         return SimpleNamespace(should_continue=False, follow_up_messages=[])
 
 
+class FakeContextManager:
+    def prepare_for_query(self, *, session_state, run_state, store, query_source):
+        observability = {"steps": ["estimate"], "before_tokens": 0, "after_tokens": 0}
+        run_state.context_observability = observability
+        return SimpleNamespace(messages=list(session_state.conversation_messages), observability=observability)
+
+
 def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
     session_state = SessionState(conversation_messages=[])
     store = SessionStore(session_state)
@@ -128,6 +146,7 @@ def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -166,6 +185,7 @@ def test_query_loop_shows_ui_only_fallback_for_empty_tool_turn() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -211,6 +231,7 @@ def test_query_loop_composes_fallback_for_three_tools() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -248,6 +269,7 @@ def test_query_loop_composes_fallback_across_skill_and_following_tools() -> None
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -283,6 +305,7 @@ def test_query_loop_composes_fallback_for_single_tool() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -356,6 +379,7 @@ def test_query_loop_renders_full_todo_plan_once_then_current_focus() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -419,6 +443,7 @@ def test_query_loop_renders_completion_summary_when_todo_plan_clears() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -514,6 +539,7 @@ def test_query_loop_renders_full_plan_again_after_clear_without_completion_snaps
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 

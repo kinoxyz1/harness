@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+from typing import Literal
 
 from .response import ModelResponse
+
+
+@dataclass(slots=True)
+class ModelRequestOptions:
+    query_source: str = "main_loop"
+    max_output_tokens: int | None = None
+    thinking_mode: Literal["default", "disabled"] = "default"
+
+
+class ContextWindowExceededError(RuntimeError):
+    pass
 
 
 class ModelGateway:
@@ -26,6 +39,7 @@ class ModelGateway:
         *,
         system: str = "",
         tools: list[dict[str, Any]] | None,
+        request_options: ModelRequestOptions | None = None,
     ) -> ModelResponse:
         """执行一次模型调用。
 
@@ -45,7 +59,15 @@ class ModelGateway:
         if self._client is None:
             raise RuntimeError("No LLM client configured")
 
-        response = self._client.call(messages, system=system, tools=tools)
+        if request_options is None:
+            response = self._client.call(messages, system=system, tools=tools)
+        else:
+            response = self._client.call(
+                messages,
+                system=system,
+                tools=tools,
+                request_options=request_options,
+            )
         return ModelResponse(
             content=response.content or "",
             tool_calls=list(response.tool_calls or []),

@@ -15,6 +15,7 @@ from typing import Any
 from rich.console import Console
 
 from ..shared.config import MAX_TOKENS, MODEL, THINKING_MODE, THINKING_BUDGET
+from .client import ContextWindowExceededError, ModelRequestOptions
 from .factory import create_llm_client
 from .protocol import normalize_messages
 from ..shared.run_options import RunDisplayOptions
@@ -92,6 +93,23 @@ class AnthropicClient:
         else:
             params["thinking"] = {"type": "adaptive"}
 
+    def _is_context_window_exceeded(self, err: Exception) -> bool:
+        text = str(err).lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "prompt is too long",
+                "prompt too long",
+                "context length",
+                "context window",
+                "maximum context",
+            )
+        )
+
+    def _raise_context_window_exceeded_if_needed(self, err: Exception) -> None:
+        if self._is_context_window_exceeded(err):
+            raise ContextWindowExceededError(str(err))
+
     def call(
         self,
         messages: list[dict[str, Any]],
@@ -99,6 +117,7 @@ class AnthropicClient:
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
         display: RunDisplayOptions | None = None,
+        request_options: ModelRequestOptions | None = None,
     ) -> LLMResponse:
         """执行一次 Anthropic API 调用。
 
@@ -122,6 +141,7 @@ class AnthropicClient:
             raise NotImplementedError("Streaming is not supported in this migration")
 
         display = display or RunDisplayOptions()
+        request_options = request_options or ModelRequestOptions()
 
         normalized_system, api_messages = normalize_messages(messages)
         full_system = "\n\n".join(part for part in [system, normalized_system] if part)
@@ -130,11 +150,17 @@ class AnthropicClient:
             "model": MODEL,
             "system": full_system,
             "messages": api_messages,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": (
+                request_options.max_output_tokens
+                if request_options.max_output_tokens is not None
+                else MAX_TOKENS
+            ),
         }
         if tools:
             params["tools"] = tools
-        self._apply_thinking(params)
+        if request_options.thinking_mode != "disabled":
+            self._apply_thinking(params)
+        adaptive_probe_attempted = params.get("thinking", {}).get("type") == "adaptive"
 
         result: dict[str, Any] = {}
         error: dict[str, Any] = {}
@@ -162,6 +188,8 @@ class AnthropicClient:
 
         if error.get("data"):
             err = error["data"]
+            if isinstance(err, Exception):
+                self._raise_context_window_exceeded_if_needed(err)
             # adaptive 不支持时自动 fallback 到 enabled
             if (
                 self._adaptive_supported is None
@@ -188,11 +216,14 @@ class AnthropicClient:
                         sys.stdout.flush()
                     retry_thread.join(timeout=1.0)
                 if error.get("data"):
-                    raise error["data"]
+                    retry_err = error["data"]
+                    if isinstance(retry_err, Exception):
+                        self._raise_context_window_exceeded_if_needed(retry_err)
+                    raise retry_err
             else:
                 raise err
 
-        if self._adaptive_supported is None:
+        if self._adaptive_supported is None and adaptive_probe_attempted:
             self._adaptive_supported = True
 
         response = result["data"]

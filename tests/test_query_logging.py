@@ -31,8 +31,40 @@ class FakeRenderer:
 
 
 class FakeViewBuilder:
-    def build(self, state: SessionState, *, run_state=None, prompt_assembler=None, working_dir=".", project_root=None, transcript_char_budget=None) -> ModelInputView:
-        return ModelInputView(system="SYSTEM", messages=list(state.conversation_messages), tools=None)
+    def __init__(self) -> None:
+        self.last_messages = None
+
+    def build(
+        self,
+        state: SessionState,
+        *,
+        run_state=None,
+        prompt_assembler=None,
+        working_dir=".",
+        project_root=None,
+        transcript_char_budget=None,
+        transcript_messages=None,
+    ) -> ModelInputView:
+        self.last_messages = transcript_messages
+        source = transcript_messages if transcript_messages is not None else state.conversation_messages
+        return ModelInputView(system="SYSTEM", messages=list(source), tools=None)
+
+
+class FakeContextManager:
+    def __init__(self, prepared_messages=None, observability=None) -> None:
+        self.prepared_messages = prepared_messages
+        self.observability = observability or {
+            "steps": ["estimate"],
+            "before_tokens": 0,
+            "after_tokens": 0,
+        }
+
+    def prepare_for_query(self, *, session_state, run_state, store, query_source):
+        run_state.context_observability = dict(self.observability)
+        messages = self.prepared_messages
+        if messages is None:
+            messages = list(session_state.conversation_messages)
+        return SimpleNamespace(messages=messages, observability=run_state.context_observability)
 
 
 class FakeModelGateway:
@@ -41,6 +73,7 @@ class FakeModelGateway:
             content="final answer",
             reasoning="reasoning trace",
             finish_reason="end_turn",
+            prompt_tokens=321,
         )
 
 
@@ -106,11 +139,13 @@ def test_query_loop_renders_reasoning_when_present() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
     assert result.stop_reason == StopReason.COMPLETED
     assert renderer.thinking_calls == [("思考过程", "reasoning trace")]
+    assert session_state.compact_state["last_prompt_tokens"] == 321
 
 
 def test_query_loop_renders_reasoning_with_todo_planning_policy() -> None:
@@ -128,6 +163,7 @@ def test_query_loop_renders_reasoning_with_todo_planning_policy() -> None:
         tool_context=object(),
         policy_runner=PolicyRunner([TodoPlanningPolicy()]),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -150,6 +186,7 @@ def test_query_loop_renders_assistant_content_when_tool_calls_are_present() -> N
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
         renderer=renderer,
     )
 
@@ -171,9 +208,43 @@ def test_query_loop_marks_next_turn_after_tool_batch() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
+        context_manager=FakeContextManager(),
     )
 
     assert result.stop_reason == StopReason.COMPLETED
     assert result.turns_used == 1
     assert session_state.conversation_messages[-2]["role"] == "tool"
     assert session_state.conversation_messages[-2]["content"] == "ok"
+
+
+def test_query_loop_uses_context_manager_before_view_builder_and_surfaces_status() -> None:
+    session_state = SessionState(conversation_messages=[{"role": "user", "content": "raw"}])
+    store = SessionStore(session_state)
+    builder = FakeViewBuilder()
+    renderer = FakeRenderer()
+    observability = {
+        "steps": ["estimate", "tool_result_budget", "microcompact"],
+        "before_tokens": 1200,
+        "after_tokens": 800,
+    }
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=builder,
+        prompt_assembler=object(),
+        model_gateway=FakeModelGateway(),
+        tool_runtime=object(),
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        context_manager=FakeContextManager(
+            prepared_messages=[{"role": "user", "content": "prepared"}],
+            observability=observability,
+        ),
+        renderer=renderer,
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    assert builder.last_messages == [{"role": "user", "content": "prepared"}]
+    assert renderer.status_calls == ["上下文管理: tool_result_budget,microcompact 1200->800"]

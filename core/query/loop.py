@@ -22,6 +22,7 @@ from core.query.state import RunState
 from core.session.state import TodoItem
 from core.tools.context import SessionUpdateKind
 from core.tools.runtime import ToolBatchResult, ToolCall
+from core.llm.client import ContextWindowExceededError
 
 
 # ─── 工具调用解析 ────────────────────────────────────────────────────────────
@@ -203,6 +204,7 @@ class QueryLoop:
         tool_context,
         policy_runner,
         recovery,
+        context_manager,
         renderer=None,
     ) -> QueryResult:
         """执行一次完整的查询循环。
@@ -237,6 +239,23 @@ class QueryLoop:
                 store.extend(before_messages)
 
             # ── 步骤 2：构建模型输入 ──────────────────────────────────
+            prepared = context_manager.prepare_for_query(
+                session_state=session_state,
+                run_state=state,
+                store=store,
+                query_source="main_loop",
+            )
+            if renderer and prepared.observability.get("steps") != ["estimate"]:
+                renderer.show_status(
+                    "上下文管理: "
+                    + ",".join(
+                        step
+                        for step in prepared.observability.get("steps", [])
+                        if step != "estimate"
+                    )
+                    + f" {prepared.observability.get('before_tokens', 0)}->{prepared.observability.get('after_tokens', 0)}"
+                )
+
             # view_builder 从 state 中组装：
             # - system: 稳定指令 + 运行时上下文（skill/todo/文件状态）+ 单轮覆盖层
             # - messages: 从 conversation_messages 中按预算截取的 transcript slice
@@ -248,12 +267,27 @@ class QueryLoop:
                 prompt_assembler=prompt_assembler,
                 working_dir=working_dir,
                 project_root=getattr(tool_context, "working_dir", None),
+                transcript_messages=prepared.messages,
             )
 
             # ── 步骤 3：调用模型 ─────────────────────────────────────
             # max_turns 已触发时不再传 tools，迫使模型给出最终文本
             active_tools = None if state.stop_reason == "max_turns" else view.tools
-            model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
+            try:
+                model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
+            except ContextWindowExceededError:
+                if state.reactive_recovery_attempted:
+                    raise
+                context_manager.reactive_recover(
+                    session_state=session_state,
+                    run_state=state,
+                    store=store,
+                )
+                state.reactive_recovery_attempted = True
+                continue
+            prompt_tokens = getattr(model_resp, "prompt_tokens", None)
+            if isinstance(prompt_tokens, int):
+                session_state.compact_state["last_prompt_tokens"] = prompt_tokens
 
             # 显示 thinking 过程（蓝框）
             if renderer and getattr(model_resp, "reasoning", "").strip():

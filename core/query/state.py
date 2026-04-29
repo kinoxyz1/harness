@@ -18,6 +18,8 @@ class RunState:
     tool_calls_executed: int = 0                 # 累计执行的工具调用数
     files_modified: list[str] = field(default_factory=list)  # 本轮修改的文件列表
     usage_delta: dict[str, int] = field(default_factory=dict)
+    reactive_recovery_attempted: bool = False
+    context_observability: dict[str, Any] = field(default_factory=dict)
     transition: "TransitionReason | None" = None
 
     allowed_tools_override: set[str] | None = None  # 限制后续可用的工具集合

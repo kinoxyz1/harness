@@ -53,7 +53,7 @@ class TestAssistantToolCalls:
             },
         ]
         system, msgs = normalize_messages(messages)
-        assert len(msgs) == 2
+        assert len(msgs) == 3
         assistant_msg = msgs[1]
         assert assistant_msg["role"] == "assistant"
         assert isinstance(assistant_msg["content"], list)
@@ -62,6 +62,16 @@ class TestAssistantToolCalls:
             "id": "tu_1",
             "name": "bash",
             "input": {"command": "pwd"},
+        }
+        assert msgs[2] == {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu_1",
+                    "content": "(cancelled)",
+                },
+            ],
         }
 
     def test_assistant_with_text_and_tool_calls(self):
@@ -151,6 +161,131 @@ class TestUnclosedToolCalls:
         assert "tu_2" in ids
         tu2_result = next(tr for tr in tool_results if tr["tool_use_id"] == "tu_2")
         assert tu2_result["content"] == "(cancelled)"
+
+    def test_drops_orphaned_tool_result(self):
+        messages = [
+            {"role": "user", "content": "Do stuff"},
+            {"role": "tool", "tool_call_id": "tu_missing", "content": "orphan"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tu_1", "name": "bash", "args": {"command": "pwd"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tu_1", "content": "/home"},
+        ]
+
+        system, msgs = normalize_messages(messages)
+
+        assert system == ""
+        assert msgs == [
+            {"role": "user", "content": "Do stuff"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_1",
+                        "name": "bash",
+                        "input": {"command": "pwd"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "content": "/home",
+                    },
+                ],
+            },
+        ]
+
+    def test_drops_tool_result_for_later_duplicate_tool_use_id(self):
+        messages = [
+            {"role": "user", "content": "First"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tu_1", "name": "bash", "args": {"command": "pwd"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tu_1", "content": "/first"},
+            {"role": "user", "content": "Second"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tu_1", "name": "bash", "args": {"command": "ls"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tu_1", "content": "/second"},
+        ]
+
+        system, msgs = normalize_messages(messages)
+
+        assert system == ""
+        assert msgs == [
+            {"role": "user", "content": "First"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_1",
+                        "name": "bash",
+                        "input": {"command": "pwd"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "content": "/first",
+                    },
+                    {"type": "text", "text": "Second"},
+                ],
+            },
+        ]
+
+
+class TestCompactMetaNormalization:
+    @pytest.mark.parametrize(
+        ("role", "expected_message"),
+        [
+            (
+                "meta_compact_summary",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "compact marker"}],
+                },
+            ),
+            (
+                "meta_compact_boundary",
+                {"role": "user", "content": "compact marker"},
+            ),
+            (
+                "meta_runtime_restore",
+                {"role": "user", "content": "compact marker"},
+            ),
+        ],
+    )
+    def test_compact_meta_roles_normalize_provider_safe(self, role, expected_message):
+        messages = [
+            {"role": role, "content": "compact marker"},
+        ]
+
+        system, msgs = normalize_messages(messages)
+
+        assert system == ""
+        assert msgs == [expected_message]
 
 
 class TestConsecutiveRoleMerge:

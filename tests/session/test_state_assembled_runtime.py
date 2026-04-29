@@ -12,6 +12,7 @@ from pathlib import Path
 from core.prompt.assembler import PromptAssembler
 from core.query.state import RunState
 from core.session.state import SessionState, TodoItem, TodoState
+from core.session.store import SessionStore
 from core.session.view_builder import MessageViewBuilder
 from core.skills.models import InvokedSkillRecord
 from core.tools.context import FileState
@@ -103,3 +104,68 @@ def test_runtime_view_includes_no_system_role_messages_in_transcript(
     assert not any(m["role"] == "system" for m in view.messages)
     # But skill content IS in the assembled system
     assert "Skill instructions" in view.system
+
+
+def test_runtime_view_survives_after_transcript_rewrite(
+    tmp_path: Path,
+) -> None:
+    state = SessionState(
+        conversation_messages=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "old assistant"},
+            {"role": "tool", "content": "old tool"},
+        ],
+    )
+    state.invoked_skills["rewrite-skill"] = InvokedSkillRecord(
+        skill_id="rewrite-skill",
+        skill_path="/skills/rewrite-skill/SKILL.md",
+        content_digest="digest-2",
+        content="<skill-runtime>Rewrite-safe skill instructions</skill-runtime>",
+        invoked_at_turn=4,
+    )
+    state.todo_state = TodoState(
+        items=[
+            TodoItem(
+                content="Preserve runtime truth",
+                active_form="Preserving runtime truth",
+                status="in_progress",
+                workflow_ref="1",
+            )
+        ]
+    )
+    file_path = tmp_path / "rewrite.md"
+    state.read_file_state[str(file_path)] = FileState(
+        content="rewrite content",
+        timestamp=20.0,
+        offset=None,
+        limit=None,
+    )
+    store = SessionStore(state)
+    store.replace_working_transcript(
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "meta_compact_boundary", "kind": "compact_boundary", "content": "reason=summary_compact;summarized_messages=2"},
+            {"role": "meta_compact_summary", "kind": "compact_summary", "content": "summary"},
+            {"role": "user", "content": "follow-up"},
+        ]
+    )
+
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+    view = builder.build(
+        state,
+        run_state=RunState(),
+        prompt_assembler=assembler,
+        working_dir=str(tmp_path),
+        project_root=str(tmp_path),
+    )
+
+    assert "Rewrite-safe skill instructions" in view.system
+    assert "Preserving runtime truth" in view.system
+    assert "rewrite.md" in view.system
+    assert [message["role"] for message in view.messages] == [
+        "user",
+        "meta_compact_boundary",
+        "meta_compact_summary",
+        "user",
+    ]

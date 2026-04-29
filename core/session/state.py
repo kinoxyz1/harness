@@ -39,6 +39,16 @@ class TodoState:
     last_reminder_turn: int | None = None    # 上次注入"计划过时"提醒的 turn，防止重复
 
 
+def _default_compact_state() -> dict[str, Any]:
+    return {
+        "tool_result_replacements": {},
+        "consecutive_summary_failures": 0,
+        "summary_compact_cooldown_until": 0.0,
+        "last_prompt_tokens": 0,
+        "last_compact_observability": {},
+    }
+
+
 @dataclass(slots=True)
 class SessionState:
     """会话级状态 — 跨 query 持久化的所有数据。
@@ -87,3 +97,4 @@ class SessionState:
     session_metadata: dict[str, Any] = field(default_factory=dict)
     usage_totals: dict[str, int] = field(default_factory=dict)
     todo_state: TodoState = field(default_factory=TodoState)
+    compact_state: dict[str, Any] = field(default_factory=_default_compact_state)

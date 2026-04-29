@@ -183,3 +183,32 @@ def test_skill_invocation_records_the_current_query_turn(tmp_path: Path) -> None
     engine.submit_user_message("Generate the analysis report")
 
     assert engine.state.invoked_skills["analysis-report"].invoked_at_turn == 1
+
+
+def test_session_engine_default_query_loop_path_wires_context_manager(tmp_path: Path) -> None:
+    write_analysis_report_fixture(tmp_path)
+    engine = make_engine_with_stubbed_model(
+        tmp_path,
+        responses=[response_with_text("final")],
+    )
+
+    result = engine.submit_user_message("Generate the analysis report")
+
+    assert result.final_output == "final"
+
+
+def test_session_engine_default_summary_compaction_supports_legacy_gateway(tmp_path: Path) -> None:
+    write_analysis_report_fixture(tmp_path)
+    engine = make_engine_with_stubbed_model(
+        tmp_path,
+        responses=[
+            response_with_text("summary"),
+            response_with_text("final"),
+        ],
+    )
+    for _ in range(5):
+        engine.append_message({"role": "user", "content": "x" * 90_000})
+
+    result = engine.submit_user_message("Generate the analysis report")
+
+    assert result.final_output == "final"
