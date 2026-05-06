@@ -1,118 +1,73 @@
 from pathlib import Path
 
 from core.llm.protocol import normalize_messages
-from core.prompt.assembler import PromptAssembler
 from core.query.state import RunState
-from core.session.state import SessionState
+from core.session.query_context import ContextBlock, PreparedQueryContext
 from core.session.view_builder import MessageViewBuilder, ModelInputView
 
 
-def test_build_returns_system_and_transcript_slice_separately(tmp_path: Path) -> None:
-    state = SessionState(
-        conversation_messages=[
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "world"},
-        ],
-    )
+def test_build_assembles_system_from_prepared_context() -> None:
     builder = MessageViewBuilder()
-    assembler = PromptAssembler()
-
-    view = builder.build(
-        state,
-        run_state=RunState(),
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
+    prepared = PreparedQueryContext(
+        stable_system="stable",
+        stable_tools=[{"name": "todo"}],
+        runtime_blocks=[
+            ContextBlock(kind="environment", content="<environment />", required=True, token_estimate=5),
+            ContextBlock(kind="todo_state", content="<todo-state />", required=True, token_estimate=5),
+        ],
+        working_transcript=[{"role": "user", "content": "hello"}],
     )
+
+    view = builder.build(prepared, run_state=RunState())
 
     assert isinstance(view, ModelInputView)
-    assert isinstance(view.system, str)
-    assert view.messages == state.conversation_messages
-    assert "transcript_slice" in view.internal_runtime_view
+    assert view.system == "stable\n\n<environment />\n\n<todo-state />"
+    assert view.messages == [{"role": "user", "content": "hello"}]
+    assert [tool["name"] for tool in view.tools] == ["todo"]
 
 
-def test_build_with_run_state_filters_tools(tmp_path: Path) -> None:
-    state = SessionState(conversation_messages=[{"role": "user", "content": "hello"}])
-    run_state = RunState(allowed_tools_override={"todo"})
-    builder = MessageViewBuilder(
-        tools=[
-            {"name": "skill", "description": "skill", "input_schema": {"type": "object", "properties": {}, "required": []}},
-            {"name": "todo", "description": "todo", "input_schema": {"type": "object", "properties": {}, "required": []}},
-        ]
+def test_build_does_not_slice_prepared_transcript() -> None:
+    builder = MessageViewBuilder()
+    prepared = PreparedQueryContext(
+        stable_system="stable",
+        stable_tools=None,
+        runtime_blocks=[],
+        working_transcript=[
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ],
     )
-    assembler = PromptAssembler()
 
-    view = builder.build(
-        state,
-        run_state=run_state,
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
+    view = builder.build(prepared, run_state=RunState())
+
+    assert view.messages == prepared.working_transcript
+
+
+def test_build_filters_tools_by_allowed_override() -> None:
+    builder = MessageViewBuilder()
+    prepared = PreparedQueryContext(
+        stable_system="system",
+        stable_tools=[
+            {"name": "skill", "description": "skill", "input_schema": {"type": "object"}},
+            {"name": "todo", "description": "todo", "input_schema": {"type": "object"}},
+        ],
+        runtime_blocks=[],
+        working_transcript=[{"role": "user", "content": "hello"}],
     )
+
+    view = builder.build(prepared, run_state=RunState(allowed_tools_override={"todo"}))
 
     assert [tool["name"] for tool in view.tools] == ["todo"]
 
 
-def test_build_respects_transcript_char_budget(tmp_path: Path) -> None:
-    long_text = "x" * 300
-    state = SessionState(
-        conversation_messages=[
-            {"role": "user", "content": "u1"},
-            {"role": "assistant", "content": long_text},
-            {"role": "user", "content": "u2"},
-        ],
-    )
+def test_build_strips_signature_but_preserves_reasoning() -> None:
     builder = MessageViewBuilder()
-    assembler = PromptAssembler()
-
-    view = builder.build(
-        state,
-        run_state=RunState(),
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-        transcript_char_budget=50,
-    )
-
-    assert view.messages[-1] == {"role": "user", "content": "u2"}
-    assert sum(len(m.get("content", "")) for m in view.messages if isinstance(m.get("content"), str)) <= 50
-
-
-def test_build_keeps_tool_use_with_trailing_tool_result_when_budget_is_tight(tmp_path: Path) -> None:
-    tool_result = "x" * 30_000
-    state = SessionState(
-        conversation_messages=[
-            {"role": "user", "content": "Analyze the CSV"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "toolu_read_1", "name": "read_file", "args": {"path": "data.csv"}},
-                ],
-            },
-            {"role": "tool", "tool_call_id": "toolu_read_1", "content": tool_result},
-        ],
-    )
-    builder = MessageViewBuilder()
-    assembler = PromptAssembler()
-
-    view = builder.build(
-        state,
-        run_state=RunState(),
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-        transcript_char_budget=24_000,
-    )
-
-    assert [message["role"] for message in view.messages] == ["assistant", "tool"]
-    assert view.messages[0]["tool_calls"][0]["id"] == "toolu_read_1"
-    assert view.messages[1]["tool_call_id"] == "toolu_read_1"
-
-
-def test_build_preserves_reasoning_for_older_assistant_tool_call_messages(tmp_path: Path) -> None:
-    state = SessionState(
-        conversation_messages=[
+    prepared = PreparedQueryContext(
+        stable_system="system",
+        stable_tools=None,
+        runtime_blocks=[],
+        working_transcript=[
             {"role": "user", "content": "Make slides"},
             {
                 "role": "assistant",
@@ -140,16 +95,8 @@ def test_build_preserves_reasoning_for_older_assistant_tool_call_messages(tmp_pa
             {"role": "tool", "tool_call_id": "toolu_read", "content": "read ok"},
         ],
     )
-    builder = MessageViewBuilder()
-    assembler = PromptAssembler()
 
-    view = builder.build(
-        state,
-        run_state=RunState(),
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view = builder.build(prepared, run_state=RunState())
     _, normalized = normalize_messages(view.messages)
 
     assistant_tool_messages = [
@@ -157,27 +104,27 @@ def test_build_preserves_reasoning_for_older_assistant_tool_call_messages(tmp_pa
         for message in normalized
         if message["role"] == "assistant"
     ]
-    first_tool_message_blocks = assistant_tool_messages[0]["content"]
 
-    assert first_tool_message_blocks[0] == {
-        "type": "thinking",
-        "thinking": "Need to load the skill first.",
-        "signature": "sig-skill",
-    }
+    for idx, msg in enumerate(assistant_tool_messages):
+        thinking_blocks = [b for b in msg.get("content", []) if b.get("type") == "thinking"]
+        assert len(thinking_blocks) == 1, f"第 {idx} 条 assistant 消息缺少 thinking block: {msg}"
+        assert "signature" not in thinking_blocks[0], f"第 {idx} 条 assistant 消息的 thinking block 不应包含 signature"
 
 
-def test_build_uses_explicit_transcript_messages_when_supplied(tmp_path: Path) -> None:
-    state = SessionState(conversation_messages=[{"role": "user", "content": "original"}])
+def test_build_internal_runtime_view_includes_budget_and_blocks() -> None:
     builder = MessageViewBuilder()
-    assembler = PromptAssembler()
-
-    view = builder.build(
-        state,
-        run_state=RunState(),
-        prompt_assembler=assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-        transcript_messages=[{"role": "user", "content": "prepared"}],
+    prepared = PreparedQueryContext(
+        stable_system="system",
+        stable_tools=None,
+        runtime_blocks=[
+            ContextBlock(kind="environment", content="env", required=True, token_estimate=1),
+        ],
+        working_transcript=[{"role": "user", "content": "hi"}],
+        budget={"stable_system_tokens": 10, "stable_tools_tokens": 0, "required_runtime_tokens": 1},
     )
 
-    assert view.messages == [{"role": "user", "content": "prepared"}]
+    view = builder.build(prepared, run_state=RunState())
+
+    assert view.internal_runtime_view["runtime_blocks"] == ["environment"]
+    assert view.internal_runtime_view["budget"]["stable_system_tokens"] == 10
+    assert "working_transcript" in view.internal_runtime_view

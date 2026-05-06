@@ -205,6 +205,7 @@ class QueryLoop:
         policy_runner,
         recovery,
         context_manager,
+        tools=None,
         renderer=None,
     ) -> QueryResult:
         """执行一次完整的查询循环。
@@ -212,13 +213,15 @@ class QueryLoop:
         Args:
             session_state: 会话级状态（跨 query 持久化），包含对话历史、skill、todo 等。
             store: 消息存储，负责向 conversation_messages 追加消息。
-            view_builder: 消息视图构建器，将 state 转为 ModelInputView。
+            view_builder: 消息视图构建器，将 PreparedQueryContext 转为 ModelInputView。
             prompt_assembler: 提示词组装器，渲染 system prompt 的各部分。
             model_gateway: 模型网关，执行单次 API 调用。
             tool_runtime: 工具运行时，执行工具调用批次。
             tool_context: 工具上下文，提供工作目录、文件状态等。
             policy_runner: 策略运行器，注入前置/后置消息，控制循环终止。
             recovery: 恢复管理器，处理空响应等异常情况。
+            context_manager: 上下文管理器，预算治理并产出 PreparedQueryContext。
+            tools: 可用工具 schema 列表。
             renderer: UI 渲染器，展示思考过程、assistant 回复、工具状态等。
 
         Returns:
@@ -231,19 +234,36 @@ class QueryLoop:
                 apply_session_update(session_state, update)
 
             # ── 步骤 1：策略注入 ──────────────────────────────────────
-            # policy_runner 可以在模型调用前注入消息，例如：
-            # - skill 刚展开时注入 "请刷新 todo" 提醒
-            # - 连续多轮未写 todo 时注入 "计划可能过时" 提醒
             before_messages = policy_runner.before_model_call(session_state, state)
             if before_messages:
                 store.extend(before_messages)
 
             # ── 步骤 2：构建模型输入 ──────────────────────────────────
+            working_dir = getattr(tool_context, "working_dir", None) or "."
+
+            stable_system = prompt_assembler.build_stable_context(
+                session_state,
+                project_root=working_dir if tool_context is not None else None,
+            )
+            stable_tools = prompt_assembler.build_stable_tools(
+                session_state,
+                tools=tools,
+            )
+            runtime_blocks = prompt_assembler.build_runtime_blocks(
+                session_state,
+                working_dir=working_dir,
+            )
+            overlay_blocks = prompt_assembler.build_query_overlay_blocks(session_state, state)
+
             prepared = context_manager.prepare_for_query(
                 session_state=session_state,
                 run_state=state,
                 store=store,
                 query_source="main_loop",
+                stable_system=stable_system,
+                stable_tools=stable_tools,
+                runtime_blocks=runtime_blocks,
+                overlay_blocks=overlay_blocks,
             )
             if renderer and prepared.observability.get("steps") != ["estimate"]:
                 renderer.show_status(
@@ -256,22 +276,12 @@ class QueryLoop:
                     + f" {prepared.observability.get('before_tokens', 0)}->{prepared.observability.get('after_tokens', 0)}"
                 )
 
-            # view_builder 从 state 中组装：
-            # - system: 稳定指令 + 运行时上下文（skill/todo/文件状态）+ 单轮覆盖层
-            # - messages: 从 conversation_messages 中按预算截取的 transcript slice
-            # - tools: 根据 allowed_tools_override 过滤后的工具列表
-            working_dir = getattr(tool_context, "working_dir", None) or "."
             view = view_builder.build(
-                session_state,
+                prepared,
                 run_state=state,
-                prompt_assembler=prompt_assembler,
-                working_dir=working_dir,
-                project_root=getattr(tool_context, "working_dir", None),
-                transcript_messages=prepared.messages,
             )
 
             # ── 步骤 3：调用模型 ─────────────────────────────────────
-            # max_turns 已触发时不再传 tools，迫使模型给出最终文本
             active_tools = None if state.stop_reason == "max_turns" else view.tools
             try:
                 model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
@@ -282,6 +292,10 @@ class QueryLoop:
                     session_state=session_state,
                     run_state=state,
                     store=store,
+                    stable_system=stable_system,
+                    stable_tools=stable_tools,
+                    runtime_blocks=runtime_blocks,
+                    overlay_blocks=overlay_blocks,
                 )
                 state.reactive_recovery_attempted = True
                 continue

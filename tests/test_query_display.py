@@ -46,19 +46,12 @@ class FakeRenderer:
 
 
 class FakeViewBuilder:
-    def build(
-        self,
-        state: SessionState,
-        *,
-        run_state=None,
-        prompt_assembler=None,
-        working_dir=".",
-        project_root=None,
-        transcript_char_budget=None,
-        transcript_messages=None,
-    ) -> ModelInputView:
-        source = transcript_messages if transcript_messages is not None else state.conversation_messages
-        return ModelInputView(system="SYSTEM", messages=list(source), tools=None)
+    def build(self, prepared, *, run_state):
+        return ModelInputView(
+            system="SYSTEM",
+            messages=list(prepared.working_transcript),
+            tools=None,
+        )
 
 
 class FakeModelGateway:
@@ -113,11 +106,30 @@ class FakeRecovery:
         return SimpleNamespace(should_continue=False, follow_up_messages=[])
 
 
+class FakePromptAssembler:
+    def build_stable_context(self, state, *, project_root=None):
+        return "stable"
+
+    def build_stable_tools(self, state, *, tools=None):
+        return tools
+
+    def build_runtime_blocks(self, state, *, working_dir):
+        return []
+
+    def build_query_overlay_blocks(self, state, run_state):
+        return []
+
+
 class FakeContextManager:
-    def prepare_for_query(self, *, session_state, run_state, store, query_source):
+    def prepare_for_query(self, *, session_state, run_state, store, query_source, **kwargs):
         observability = {"steps": ["estimate"], "before_tokens": 0, "after_tokens": 0}
         run_state.context_observability = observability
-        return SimpleNamespace(messages=list(session_state.conversation_messages), observability=observability)
+        msgs = list(session_state.conversation_messages)
+        return SimpleNamespace(
+            messages=msgs,
+            working_transcript=msgs,
+            observability=observability,
+        )
 
 
 def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
@@ -140,7 +152,7 @@ def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=runtime,
         tool_context=object(),
@@ -179,7 +191,7 @@ def test_query_loop_shows_ui_only_fallback_for_empty_tool_turn() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=runtime,
         tool_context=object(),
@@ -225,7 +237,7 @@ def test_query_loop_composes_fallback_for_three_tools() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=runtime,
         tool_context=object(),
@@ -263,7 +275,7 @@ def test_query_loop_composes_fallback_across_skill_and_following_tools() -> None
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=runtime,
         tool_context=object(),
@@ -299,7 +311,7 @@ def test_query_loop_composes_fallback_for_single_tool() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=runtime,
         tool_context=object(),
@@ -373,7 +385,7 @@ def test_query_loop_renders_full_todo_plan_once_then_current_focus() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=TodoWritingRuntime(),
         tool_context=object(),
@@ -437,7 +449,7 @@ def test_query_loop_renders_completion_summary_when_todo_plan_clears() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=CompletingTodoRuntime(),
         tool_context=object(),
@@ -533,7 +545,7 @@ def test_query_loop_renders_full_plan_again_after_clear_without_completion_snaps
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=gateway,
         tool_runtime=ClearingTodoRuntime(),
         tool_context=object(),

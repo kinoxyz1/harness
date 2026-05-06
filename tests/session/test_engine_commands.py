@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from core.prompt.assembler import PromptAssembler
 from core.session.engine import SessionEngine
+from core.session.query_context import PreparedQueryContext
 from core.session.view_builder import MessageViewBuilder
 from core.query.state import RunState
 
@@ -34,6 +36,21 @@ def make_engine(tmp_path: Path) -> SessionEngine:
     return engine
 
 
+def _build_view(engine: SessionEngine, tmp_path: Path) -> SimpleNamespace:
+    """Build a view using the new prepared-context flow."""
+    assembler = engine._prompt_assembler
+    stable_system = assembler.build_stable_context(engine.state, project_root=str(tmp_path))
+    stable_tools = assembler.build_stable_tools(engine.state, tools=None)
+    runtime_blocks = assembler.build_runtime_blocks(engine.state, working_dir=str(tmp_path))
+    prepared = PreparedQueryContext(
+        stable_system=stable_system,
+        stable_tools=stable_tools,
+        runtime_blocks=runtime_blocks,
+        working_transcript=engine.state.conversation_messages,
+    )
+    return engine._view_builder.build(prepared, run_state=RunState())
+
+
 def test_handle_command_use_records_skill_without_transcript_injection(tmp_path: Path) -> None:
     write_skill(tmp_path, "analysis-report", "Analysis Report", "Generate reports", "Skill body")
 
@@ -44,7 +61,6 @@ def test_handle_command_use_records_skill_without_transcript_injection(tmp_path:
 
     assert "loaded" in result.lower() or "activated" in result.lower()
     assert "analysis-report" in engine.state.invoked_skills
-    # No <skill-runtime> message should be appended to conversation_messages
     assert not any(
         "<skill-runtime>" in m.get("content", "")
         for m in engine.state.conversation_messages
@@ -55,7 +71,6 @@ def test_handle_command_use_records_skill_without_transcript_injection(tmp_path:
     assert event.skill_id == "analysis-report"
     assert event.action == "activated"
     assert event.source == "user_command"
-    # conversation_index should point at end of conversation (no runtime message appended)
     assert event.conversation_index == len(engine.state.conversation_messages)
 
 
@@ -167,7 +182,6 @@ def test_handle_command_use_repeat_records_latest_invocation(tmp_path: Path) -> 
 
 
 def test_handle_command_use_enforces_cumulative_budget_across_different_skills(tmp_path: Path) -> None:
-    """Budget accumulates across different skills in state.invoked_skills."""
     body = "x" * 130_000
     write_skill(tmp_path, "skill-a", "Skill A", "A", body)
     write_skill(tmp_path, "skill-b", "Skill B", "B", body)
@@ -229,14 +243,7 @@ def test_active_skill_body_reaches_model_view(tmp_path: Path) -> None:
     # Simulate a user message being added
     engine.append_message({"role": "user", "content": "Generate a report"})
 
-    # Build the view that would go to the model
-    view = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view = _build_view(engine, tmp_path)
 
     # No <skill-runtime> in conversation_messages (transcript-based injection removed)
     assert not any(
@@ -247,6 +254,9 @@ def test_active_skill_body_reaches_model_view(tmp_path: Path) -> None:
     # Verify: the user message is present
     user_msgs = [m for m in view.messages if m["role"] == "user"]
     assert any("Generate a report" in m["content"] for m in user_msgs)
+
+    # Verify: skill content is in the assembled system
+    assert "Use a fixed HTML structure" in view.system
 
 
 def test_off_does_not_remove_invoked_skill_record(tmp_path: Path) -> None:
@@ -269,7 +279,6 @@ def test_off_does_not_remove_invoked_skill_record(tmp_path: Path) -> None:
 
     assert "cannot be deactivated" in result.lower()
     assert before == after
-    # invoked_skills still holds the record (off cannot deactivate)
     assert "analysis-report" in engine.state.invoked_skills
 
 
@@ -287,30 +296,15 @@ def test_active_skill_persists_across_turns(tmp_path: Path) -> None:
     engine.bootstrap()
     engine.handle_command("/skills use analysis-report")
 
-    # Simulate multiple turns
     engine.append_message({"role": "user", "content": "turn 1"})
-    view1 = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view1 = _build_view(engine, tmp_path)
 
     engine.append_message({"role": "assistant", "content": "reply 1"})
     engine.append_message({"role": "user", "content": "turn 2"})
-    view2 = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view2 = _build_view(engine, tmp_path)
 
-    # Skill should still be tracked in state
     assert "analysis-report" in engine.state.invoked_skills
     assert "<skill-runtime>" in engine.state.invoked_skills["analysis-report"].content
-    # No <skill-runtime> in transcript (transcript-based injection removed)
     assert not any(
         m["role"] == "system" and "<skill-runtime>" in m.get("content", "")
         for m in view1.messages
@@ -336,23 +330,11 @@ def test_active_skill_persists_across_turns_in_assembled_system(tmp_path: Path) 
     engine.handle_command("/skills use analysis-report")
 
     engine.append_message({"role": "user", "content": "turn 1"})
-    view1 = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view1 = _build_view(engine, tmp_path)
 
     engine.append_message({"role": "assistant", "content": "reply 1"})
     engine.append_message({"role": "user", "content": "turn 2"})
-    view2 = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view2 = _build_view(engine, tmp_path)
 
     assert "analysis-report" in engine.state.invoked_skills
     assert "Persistent skill content." in view1.system
@@ -390,7 +372,6 @@ def write_skill_with_refs(
 
 
 def test_bootstrap_discovers_reference_prompt_paths(tmp_path: Path) -> None:
-    """Bootstrap should discover references with correct prompt_path."""
     write_skill_with_refs(
         tmp_path,
         "analysis-report",
@@ -409,7 +390,6 @@ def test_bootstrap_discovers_reference_prompt_paths(tmp_path: Path) -> None:
 
 
 def test_handle_command_reload_rebuilds_reference_metadata(tmp_path: Path) -> None:
-    """Reload should rebuild references with correct prompt_path."""
     write_skill_with_refs(
         tmp_path,
         "analysis-report",
@@ -423,7 +403,6 @@ def test_handle_command_reload_rebuilds_reference_metadata(tmp_path: Path) -> No
     engine = make_engine(tmp_path)
     engine.bootstrap()
 
-    # Update the skill to add a second reference
     write_skill_with_refs(
         tmp_path,
         "analysis-report",
@@ -451,12 +430,6 @@ def test_handle_command_reload_rebuilds_reference_metadata(tmp_path: Path) -> No
 
 
 def test_active_skill_reference_index_reaches_model_view(tmp_path: Path) -> None:
-    """End-to-end: references are tracked in skill catalog after bootstrap.
-
-    Note: In the new runtime, reference content is injected as inline runtime messages.
-    This test verifies the reference metadata is discovered correctly.
-    The full injection path will be wired in Task 5.
-    """
     write_skill_with_refs(
         tmp_path,
         "analysis-report",
@@ -472,24 +445,14 @@ def test_active_skill_reference_index_reaches_model_view(tmp_path: Path) -> None
     engine.handle_command("/skills use analysis-report")
     engine.append_message({"role": "user", "content": "Generate a report"})
 
-    view = engine._view_builder.build(
-        engine.state,
-        run_state=RunState(),
-        prompt_assembler=engine._prompt_assembler,
-        working_dir=str(tmp_path),
-        project_root=str(tmp_path),
-    )
+    view = _build_view(engine, tmp_path)
 
-    # Verify references were discovered
     refs = engine.state.skill_catalog["analysis-report"].references
     assert len(refs) == 1
     assert refs[0].prompt_path == ".harness/skills/analysis-report/style-system.md"
 
 
 def test_use_rejects_when_reference_chars_exceed_budget(tmp_path: Path) -> None:
-    """Budget check must include reference body chars."""
-    # Each skill: body ~50 chars + reference 260K chars = ~260K per skill
-    # Two skills = ~520K > 500K budget
     big_ref = "y" * 260_000
     for i in range(2):
         write_skill_with_refs(
@@ -513,12 +476,6 @@ def test_use_rejects_when_reference_chars_exceed_budget(tmp_path: Path) -> None:
 
 
 def test_active_skill_inlines_reference_content_in_model_view(tmp_path: Path) -> None:
-    """End-to-end: reference body content is discoverable via registry.
-
-    Note: In the new runtime, reference content is injected as inline runtime messages.
-    This test verifies the skill registry can load the content.
-    The full injection path will be wired in Task 5.
-    """
     write_skill_with_refs(
         tmp_path,
         "analysis-report",
@@ -534,22 +491,17 @@ def test_active_skill_inlines_reference_content_in_model_view(tmp_path: Path) ->
     engine.handle_command("/skills use analysis-report")
     engine.append_message({"role": "user", "content": "Generate a report"})
 
-    # Verify the skill can be loaded via the registry with reference bodies
     content = engine._skill_registry.load("analysis-report")
     assert "Follow the main workflow." in content.body
     assert "h1 { font-size: 2rem; }" in content.reference_bodies[".harness/skills/analysis-report/style-system.md"]
 
 
 def test_bootstrap_discovers_skills_without_writing_prompt_messages(tmp_path: Path) -> None:
-    """Bootstrap should discover skills but NOT write system/environment messages to transcript."""
     write_skill(tmp_path, "some-skill", "Some Skill", "A skill", "Body")
 
     engine = make_engine(tmp_path)
     engine.bootstrap()
 
-    # Skills should be discovered
     assert "some-skill" in engine.state.skill_catalog
     assert engine.state.skills_revision is not None
-
-    # Transcript should be empty — no system prompt, no environment message
     assert engine.state.conversation_messages == []

@@ -8,10 +8,15 @@ from typing import TYPE_CHECKING, Any
 from core.prompt.cache import PromptCache
 from core.prompt.system_context import get_system_context, get_user_context
 from core.query.state import RunState
+from core.session.query_context import ContextBlock
 from core.session.state import SessionState, TodoItem
 
 if TYPE_CHECKING:
     from core.skills.registry import SkillRegistry
+
+
+def _estimate_block_tokens(content: str) -> int:
+    return max(1, len(content) // 4)
 
 
 def _stable_cache_key(state: SessionState, *, project_root: str | None = None) -> str:
@@ -226,3 +231,72 @@ class PromptAssembler:
     ) -> str:
         """build_stable 的别名，供外部调用的规范接口。"""
         return self.build_stable(state, project_root=project_root)
+
+    def build_stable_tools(
+        self,
+        state: SessionState,
+        *,
+        tools: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]] | None:
+        if tools is None:
+            return None
+        return [dict(t) for t in tools]
+
+    def build_runtime_blocks(
+        self,
+        state: SessionState,
+        *,
+        working_dir: str,
+    ) -> list[ContextBlock]:
+        blocks: list[ContextBlock] = []
+
+        environment = get_user_context(working_dir)
+        blocks.append(
+            ContextBlock(
+                kind="environment",
+                content=environment,
+                required=True,
+                token_estimate=_estimate_block_tokens(environment),
+            )
+        )
+
+        active_msgs = self.build_active_skill_messages(state)
+        active_content = active_msgs[0]["content"] if active_msgs else ""
+        blocks.append(
+            ContextBlock(
+                kind="active_skills",
+                content=active_content,
+                required=True,
+                token_estimate=_estimate_block_tokens(active_content),
+            )
+        )
+
+        todo_content = _render_todo_state(state.todo_state.items)
+        blocks.append(
+            ContextBlock(
+                kind="todo_state",
+                content=todo_content,
+                required=True,
+                token_estimate=_estimate_block_tokens(todo_content),
+            )
+        )
+
+        file_block = _render_file_runtime(state.read_file_state, char_budget=12_000)
+        if file_block:
+            blocks.append(
+                ContextBlock(
+                    kind="file_runtime",
+                    content=file_block,
+                    required=False,
+                    token_estimate=_estimate_block_tokens(file_block),
+                )
+            )
+
+        return blocks
+
+    def build_query_overlay_blocks(
+        self,
+        state: SessionState,
+        run_state: RunState,
+    ) -> list[ContextBlock]:
+        return []

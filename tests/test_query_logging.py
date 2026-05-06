@@ -34,20 +34,9 @@ class FakeViewBuilder:
     def __init__(self) -> None:
         self.last_messages = None
 
-    def build(
-        self,
-        state: SessionState,
-        *,
-        run_state=None,
-        prompt_assembler=None,
-        working_dir=".",
-        project_root=None,
-        transcript_char_budget=None,
-        transcript_messages=None,
-    ) -> ModelInputView:
-        self.last_messages = transcript_messages
-        source = transcript_messages if transcript_messages is not None else state.conversation_messages
-        return ModelInputView(system="SYSTEM", messages=list(source), tools=None)
+    def build(self, prepared, *, run_state):
+        self.last_messages = prepared.working_transcript
+        return ModelInputView(system="SYSTEM", messages=list(prepared.working_transcript), tools=None)
 
 
 class FakeContextManager:
@@ -59,12 +48,16 @@ class FakeContextManager:
             "after_tokens": 0,
         }
 
-    def prepare_for_query(self, *, session_state, run_state, store, query_source):
+    def prepare_for_query(self, *, session_state, run_state, store, query_source, **kwargs):
         run_state.context_observability = dict(self.observability)
         messages = self.prepared_messages
         if messages is None:
             messages = list(session_state.conversation_messages)
-        return SimpleNamespace(messages=messages, observability=run_state.context_observability)
+        return SimpleNamespace(
+            messages=messages,
+            working_transcript=messages,
+            observability=run_state.context_observability,
+        )
 
 
 class FakeModelGateway:
@@ -124,6 +117,20 @@ class FakeRecovery:
         return SimpleNamespace(should_continue=False, follow_up_messages=[])
 
 
+class FakePromptAssembler:
+    def build_stable_context(self, state, *, project_root=None):
+        return "stable"
+
+    def build_stable_tools(self, state, *, tools=None):
+        return tools
+
+    def build_runtime_blocks(self, state, *, working_dir):
+        return []
+
+    def build_query_overlay_blocks(self, state, run_state):
+        return []
+
+
 def test_query_loop_renders_reasoning_when_present() -> None:
     session_state = SessionState(conversation_messages=[])
     store = SessionStore(session_state)
@@ -133,7 +140,7 @@ def test_query_loop_renders_reasoning_when_present() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=FakeModelGateway(),
         tool_runtime=object(),
         tool_context=object(),
@@ -157,7 +164,7 @@ def test_query_loop_renders_reasoning_with_todo_planning_policy() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=FakeModelGateway(),
         tool_runtime=object(),
         tool_context=object(),
@@ -180,7 +187,7 @@ def test_query_loop_renders_assistant_content_when_tool_calls_are_present() -> N
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=FakeModelGatewayWithToolTurn(),
         tool_runtime=FakeToolRuntime(),
         tool_context=object(),
@@ -202,7 +209,7 @@ def test_query_loop_marks_next_turn_after_tool_batch() -> None:
         session_state=session_state,
         store=store,
         view_builder=FakeViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=FakeModelGatewayWithToolTurn(),
         tool_runtime=FakeToolRuntime(),
         tool_context=object(),
@@ -232,7 +239,7 @@ def test_query_loop_uses_context_manager_before_view_builder_and_surfaces_status
         session_state=session_state,
         store=store,
         view_builder=builder,
-        prompt_assembler=object(),
+        prompt_assembler=FakePromptAssembler(),
         model_gateway=FakeModelGateway(),
         tool_runtime=object(),
         tool_context=object(),

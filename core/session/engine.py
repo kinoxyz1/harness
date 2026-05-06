@@ -81,6 +81,7 @@ class SessionEngine:
         self._policy_runner = policy_runner
         self._recovery = recovery
         self._renderer = renderer
+        self._tools = tools
         self._bootstrapped = False
 
         # Give tool context access to session state and skill registry
@@ -160,5 +161,6 @@ class SessionEngine:
             policy_runner=self._policy_runner,
             recovery=self._recovery,
             context_manager=self._context_manager,
+            tools=self._tools,
             renderer=self._renderer,
         )

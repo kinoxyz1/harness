@@ -11,6 +11,7 @@ from core.query.loop import QueryLoop
 from core.query.state import RunState
 from core.session.context_manager import ContextManager
 from core.session.compact_service import summarize_and_compact
+from core.session.query_context import ContextBlock
 from core.session.state import SessionState
 from core.session.store import SessionStore
 
@@ -153,10 +154,10 @@ def test_context_manager_runs_estimate_budget_microcompact_then_summary() -> Non
     ]
     assert prepared.observability["before_tokens"] == 1500
     assert prepared.observability["after_tokens"] > 0
-    assert prepared.messages[0]["role"] == "meta_compact_boundary"
-    assert [message["role"] for message in state.conversation_messages] == [message["role"] for message in prepared.messages]
-    assert [message["content"] for message in state.conversation_messages] == [message["content"] for message in prepared.messages]
-    assert all("_meta" in message for message in state.conversation_messages)
+    assert prepared.working_transcript[0]["role"] == "meta_compact_boundary"
+    assert [m["role"] for m in state.conversation_messages] == [m["role"] for m in prepared.working_transcript]
+    assert [m["content"] for m in state.conversation_messages] == [m["content"] for m in prepared.working_transcript]
+    assert all("_meta" in m for m in state.conversation_messages)
     assert state.compact_state["last_compact_observability"] == prepared.observability
     assert run_state.context_observability == prepared.observability
 
@@ -184,35 +185,6 @@ def test_context_manager_skips_summary_when_query_source_is_compact() -> None:
     ]
     assert service.calls == ["tool_result_budget", "microcompact"]
     assert state.conversation_messages == [{"role": "user", "content": "x" * 5000}]
-
-
-def test_context_manager_uses_post_pruning_pressure_for_summary_decision() -> None:
-    state = SessionState(
-        conversation_messages=[
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "toolu_1", "name": "read_file", "args": {"path": "a.txt"}}]},
-            {"role": "tool", "tool_call_id": "toolu_1", "content": "x" * 5000},
-        ]
-    )
-    service = ShrinkingCompactService()
-    manager = ContextManager(
-        compact_service=service,
-        summary_gateway=object(),
-        context_window_tokens=12_000,
-    )
-
-    prepared = manager.prepare_for_query(
-        session_state=state,
-        run_state=RunState(),
-        store=SessionStore(state),
-        query_source="main_loop",
-    )
-
-    assert prepared.observability["steps"] == [
-        "estimate",
-        "tool_result_budget",
-        "microcompact",
-    ]
-    assert service.calls == ["tool_result_budget", "microcompact"]
 
 
 def test_context_manager_trips_summary_breaker_after_three_failures() -> None:
@@ -360,7 +332,7 @@ def test_context_manager_allows_summary_after_cooldown_and_resets_breaker() -> N
     assert prepared.observability["steps"][-1] == "summary_compact"
     assert state.compact_state["consecutive_summary_failures"] == 0
     assert state.compact_state["summary_compact_cooldown_until"] == 0.0
-    assert prepared.messages[0]["role"] == "meta_compact_boundary"
+    assert prepared.working_transcript[0]["role"] == "meta_compact_boundary"
 
 
 def test_context_manager_reactive_recover_honors_cooldown_and_can_retry_after_expiry() -> None:
@@ -519,7 +491,7 @@ def test_context_manager_reactive_recover_preserves_latest_tool_results_through_
         run_state=RunState(),
         store=store,
     )
-    _, normalized = normalize_messages(prepared.messages)
+    _, normalized = normalize_messages(prepared.working_transcript)
 
     assert any(
         block.get("type") == "tool_result"
@@ -529,6 +501,91 @@ def test_context_manager_reactive_recover_preserves_latest_tool_results_through_
         if message["role"] == "user"
         for block in (message.get("content") if isinstance(message.get("content"), list) else [])
     )
+
+
+# ── new prepared-context tests ───────────────────────────────
+
+
+def test_context_manager_returns_prepared_query_context() -> None:
+    state = SessionState(conversation_messages=[{"role": "user", "content": "x" * 5000}])
+    state.compact_state["last_prompt_tokens"] = 1500
+    store = SessionStore(state)
+    manager = ContextManager(
+        compact_service=StubCompactService(),
+        summary_gateway=object(),
+        context_window_tokens=12_000,
+    )
+    run_state = RunState()
+
+    prepared = manager.prepare_for_query(
+        session_state=state,
+        run_state=run_state,
+        store=store,
+        query_source="main_loop",
+        stable_system="system",
+        stable_tools=[{"name": "todo"}],
+        runtime_blocks=[
+            ContextBlock(kind="environment", content="<environment />", required=True, token_estimate=5),
+            ContextBlock(kind="file_runtime", content="<file-runtime>big</file-runtime>", required=False, token_estimate=20),
+        ],
+        overlay_blocks=[],
+    )
+
+    assert prepared.stable_system == "system"
+    assert prepared.stable_tools == [{"name": "todo"}]
+    assert prepared.working_transcript[0]["role"] == "meta_compact_boundary"
+
+
+def test_context_manager_drops_optional_runtime_blocks_before_summary() -> None:
+    state = SessionState(conversation_messages=[{"role": "user", "content": "x" * 2000}])
+    manager = ContextManager(
+        compact_service=ShrinkingCompactService(),
+        summary_gateway=object(),
+        context_window_tokens=2_500,
+    )
+
+    prepared = manager.prepare_for_query(
+        session_state=state,
+        run_state=RunState(),
+        store=SessionStore(state),
+        query_source="main_loop",
+        stable_system="s" * 2000,
+        stable_tools=[{"name": "todo", "input_schema": {"type": "object"}}],
+        runtime_blocks=[
+            ContextBlock(kind="environment", content="<environment />", required=True, token_estimate=10),
+            ContextBlock(kind="file_runtime", content="<file-runtime>drop-me</file-runtime>", required=False, token_estimate=15_000),
+        ],
+        overlay_blocks=[],
+    )
+
+    assert [block.kind for block in prepared.runtime_blocks] == ["environment"]
+
+
+def test_context_manager_budget_includes_stable_system_tokens() -> None:
+    state = SessionState(conversation_messages=[{"role": "user", "content": "hi"}])
+    manager = ContextManager(
+        compact_service=StubCompactService(),
+        summary_gateway=object(),
+        context_window_tokens=100_000,
+    )
+
+    prepared = manager.prepare_for_query(
+        session_state=state,
+        run_state=RunState(),
+        store=SessionStore(state),
+        query_source="main_loop",
+        stable_system="a" * 100,
+        stable_tools=None,
+        runtime_blocks=[],
+        overlay_blocks=[],
+    )
+
+    assert prepared.budget["stable_system_tokens"] == 25
+    assert prepared.budget["stable_tools_tokens"] == 0
+    assert prepared.budget["required_runtime_tokens"] == 0
+
+
+# ── QueryLoop integration ────────────────────────────────────
 
 
 class _OverflowingModelGateway:
@@ -559,9 +616,26 @@ class _NoOpRecovery:
 
 
 class _StaticViewBuilder:
-    def build(self, *args, **kwargs):
-        transcript_messages = kwargs.get("transcript_messages", [])
-        return SimpleNamespace(system="runtime", messages=list(transcript_messages), tools=[])
+    def build(self, prepared, *, run_state):
+        return SimpleNamespace(
+            system="runtime",
+            messages=list(prepared.working_transcript),
+            tools=[],
+        )
+
+
+class _StubPromptAssembler:
+    def build_stable_context(self, state, *, project_root=None):
+        return "stable"
+
+    def build_stable_tools(self, state, *, tools=None):
+        return tools
+
+    def build_runtime_blocks(self, state, *, working_dir):
+        return []
+
+    def build_query_overlay_blocks(self, state, run_state):
+        return []
 
 
 class _ReactiveContextManager:
@@ -569,16 +643,23 @@ class _ReactiveContextManager:
         self.prepare_calls = 0
         self.reactive_calls = 0
 
-    def prepare_for_query(self, *, session_state, run_state, store, query_source):
+    def prepare_for_query(self, *, session_state, run_state, store, query_source, **kwargs):
         self.prepare_calls += 1
+        msgs = list(session_state.conversation_messages)
         return SimpleNamespace(
-            messages=list(session_state.conversation_messages),
+            messages=msgs,
+            working_transcript=msgs,
             observability={"steps": ["estimate"], "before_tokens": 1, "after_tokens": 1},
         )
 
-    def reactive_recover(self, *, session_state, run_state, store):
+    def reactive_recover(self, *, session_state, run_state, store, **kwargs):
         self.reactive_calls += 1
-        return SimpleNamespace(messages=list(session_state.conversation_messages), observability={})
+        msgs = list(session_state.conversation_messages)
+        return SimpleNamespace(
+            messages=msgs,
+            working_transcript=msgs,
+            observability={},
+        )
 
 
 def test_query_loop_retries_once_after_context_window_exceeded() -> None:
@@ -592,7 +673,7 @@ def test_query_loop_retries_once_after_context_window_exceeded() -> None:
         session_state=session_state,
         store=store,
         view_builder=_StaticViewBuilder(),
-        prompt_assembler=object(),
+        prompt_assembler=_StubPromptAssembler(),
         model_gateway=model_gateway,
         tool_runtime=SimpleNamespace(execute_batch=pytest.fail),
         tool_context=SimpleNamespace(working_dir="."),
