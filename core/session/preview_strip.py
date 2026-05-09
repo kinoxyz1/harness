@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-PERSISTED_OUTPUT_PREFIX = "Full output saved to: "
-
 
 def strip_persisted_output_previews(
     messages: list[dict[str, object]],
