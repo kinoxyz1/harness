@@ -1,6 +1,8 @@
 from core.query.state import RunState
 from core.session.state import SessionState
 from core.session.token_budget import (
+    calc_effective_context_window,
+    calc_waterlines,
     calibrated_input_tokens,
     estimate_message_tokens,
     estimate_messages_tokens,
@@ -79,3 +81,15 @@ def test_calibrated_input_tokens_prefers_observed_prompt_usage() -> None:
     assert calibrated_input_tokens(estimated_tokens=120, observed_prompt_tokens=0) == 120
     assert calibrated_input_tokens(estimated_tokens=120, observed_prompt_tokens=80) == 120
     assert calibrated_input_tokens(estimated_tokens=120, observed_prompt_tokens=180) == 180
+
+
+def test_calc_effective_context_window_subtracts_output_reserve() -> None:
+    assert calc_effective_context_window(context_window_tokens=200_000, max_output_tokens=10_000) == 190_000
+
+
+def test_calc_waterlines_returns_four_named_thresholds() -> None:
+    wl = calc_waterlines(context_window_tokens=200_000, max_output_tokens=10_000)
+    assert wl["preview_strip"] == 150_000
+    assert wl["microcompact"] == 170_000
+    assert wl["auto_compact"] == 177_000
+    assert wl["blocking"] == 187_000

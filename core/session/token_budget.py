@@ -40,3 +40,28 @@ def should_trigger_summary_compact(
 ) -> bool:
     threshold = context_window_tokens - reserved_output_tokens - compact_buffer_tokens
     return used_tokens >= threshold
+
+
+def calc_effective_context_window(
+    *,
+    context_window_tokens: int,
+    max_output_tokens: int,
+) -> int:
+    return context_window_tokens - max_output_tokens
+
+
+def calc_waterlines(
+    *,
+    context_window_tokens: int,
+    max_output_tokens: int,
+) -> dict[str, int]:
+    effective = calc_effective_context_window(
+        context_window_tokens=context_window_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+    return {
+        "preview_strip": effective - 40_000,
+        "microcompact": effective - 20_000,
+        "auto_compact": effective - 13_000,
+        "blocking": effective - 3_000,
+    }
