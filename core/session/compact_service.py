@@ -4,6 +4,7 @@ from typing import Any
 
 from core.llm.client import ModelRequestOptions
 
+from .read_working_set import collect_recent_read_restore_messages
 from .state import SessionState
 from .token_budget import estimate_message_tokens
 from .transcript_rewriter import (
@@ -121,7 +122,7 @@ def apply_time_based_microcompact(
     return compacted
 
 
-def build_runtime_restore_messages(state: SessionState) -> list[dict[str, Any]]:
+def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     restored: list[dict[str, Any]] = []
 
     if state.todo_state.items:
@@ -146,30 +147,13 @@ def build_runtime_restore_messages(state: SessionState) -> list[dict[str, Any]]:
             "content": "\n".join(skill_lines),
         })
 
-    for path, file_state in sorted(
-        state.read_file_state.items(),
-        key=lambda item: getattr(item[1], "timestamp", 0.0),
-        reverse=True,
-    )[:3]:
-        excerpt = getattr(file_state, "content", "")[:200]
-        attrs = [
-            f"path={path}",
-            f"full_read={str(getattr(file_state, 'is_full_read', True)).lower()}",
-        ]
-        start_line = getattr(file_state, "offset", None)
-        line_limit = getattr(file_state, "limit", None)
-        total_lines = getattr(file_state, "total_lines", None)
-        if start_line is not None:
-            attrs.append(f"start_line={start_line}")
-        if start_line is not None and line_limit is not None:
-            attrs.append(f"end_line={start_line + line_limit - 1}")
-        if total_lines is not None:
-            attrs.append(f"total_lines={total_lines}")
-        restored.append({
-            "role": "meta_runtime_restore",
-            "kind": "file_runtime",
-            "content": f"{';'.join(attrs)}\n{excerpt}",
-        })
+    restored.extend(
+        collect_recent_read_restore_messages(
+            state,
+            kept_messages=kept_messages or [],
+            limit=3,
+        )
+    )
 
     return restored
 
@@ -210,7 +194,7 @@ def summarize_and_compact(
     )
     summary = create_compact_summary(summary_response.content.strip())
     kept = base_messages[keep_from_index:]
-    runtime_restore = build_runtime_restore_messages(state)
+    runtime_restore = build_runtime_restore_messages(state, kept_messages=kept)
     return build_post_compact_messages(
         boundary=boundary,
         summary=summary,
