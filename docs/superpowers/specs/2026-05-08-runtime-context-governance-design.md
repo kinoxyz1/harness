@@ -40,9 +40,39 @@ harness 项目当前的上下文管理基于"截断历史消息"的思路：当�
 具体来说，要解决四个判断：
 
 - **什么时候压**：基于水位线体系，不同压力级别触发不同策略
-- **先压什么**：优先压缩工具输出（占比最大、密度最低），保护对话区域（占比小、信息密度高）
+- **先压什么**：优先压缩低密度、可回放的工具输出，保护对话区域和 `read_file` 这类 working context
 - **哪些绝对不能丢**：用户的核心需求、当前任务的关键文件路径、已做出的决策依据
 - **压完怎么无缝继续**：通过本地文件 offloading，让被压缩的内容仍然可达（模型可以主动 read 回来）
+
+### 1.4 版本范围
+
+为了避免“当前要做什么”和“后面想做什么”混在一起，本文把范围明确分成两层：
+
+**V1（本文当前实现范围）**
+
+V1 的目标是先把 Runtime Governor 跑稳，解决“上下文突然冲高时不要直接爆窗”的问题。它只包含：
+
+- 执行时 offload
+- per-message tool result budget
+- PreviewStrip
+- Microcompact
+- Auto-compact
+- blocking gate
+- `read_file` working set 保护与 compact 后最近文件恢复
+
+**V2（本文补充设计范围）**
+
+V2 不再只追求“能压下来”，而是追求“尽量少动 transcript、尽量少打断 cache、尽量少直接进入全量摘要”。它只包含三项中层治理能力：
+
+- Context Collapse：把旧上下文渐进式归档，而不是一上来就整体摘要替换
+- cache-aware microcompact：优先通过 cache-editing 路径释放压力，减少对 transcript 的破坏
+- session memory compact：优先使用本地会话记忆替代 LLM 摘要，作为 Auto-compact 前的一层重策略
+
+**明确不在 V1 / V2 范围内**
+
+- artifact-aware runtime：后续单独演进。当前 V1/V2 只先打好“本地 artifact 可落盘、可引用、可回放”的基础
+- 外部记忆：后续单独演进。当前 V2 只处理单会话内的本地归档与会话记忆，不做跨会话记忆检索
+- 中断恢复：放在更后阶段。它依赖更稳定的本地 artifact、归档日志和状态重建能力，不与当前 V2 一起落地
 
 ---
 
@@ -60,8 +90,8 @@ Claude Code 的压缩逻辑主要在 `src/services/compact/` 目录下，涉及�
 | `microCompact.ts` | 轻量清理：基于时间或缓存策略清理旧工具结果 |
 | `sessionMemoryCompact.ts` | 基于本地会话记忆的压缩，避免 API 调用 |
 | `compact.ts` | 全量摘要压缩：调 LLM 生成结构化摘要 |
-| `compactPrompt.ts` | 压缩提示词模板（9 段式摘要格式） |
-| `toolResultStorage.ts` | 工具结果的持久化与预算管理 |
+| `prompt.ts` | 压缩提示词模板（9 段式摘要格式） |
+| `src/utils/toolResultStorage.ts` | 工具结果的持久化与预算管理 |
 
 辅助模块：`tokenEstimation.ts`（token 估算）、`compactWarningState.ts`（警告状态管理）、`timeBasedMCConfig.ts`（GrowthBook 配置）。
 
@@ -118,6 +148,8 @@ Preview (first 2KB):
 
 **Bash 的额外限制**（`outputLimits.ts`）：默认 30,000 字符，上限 150,000 字符。
 
+**Read 的例外处理**：Claude Code 明确把 `Read` 设为 `maxResultSizeChars = Infinity`，不走通用“大结果落盘”路径。原因不是 `Read` 不大，而是它被当作当前推理所需的工作材料；同时 `Read` 自身有 `maxTokens` 上限、重复读取去重、`readFileState` 缓存，以及 compact 后的最近文件恢复机制。
+
 **阶段 2 — 聚合预算（`enforceToolResultBudget`）**
 
 `enforceToolResultBudget()`（第 769-909 行）在同一轮多个工具执行完后，按 API 消息分组执行聚合预算。每组的工具结果总和不超过 `MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000`（`toolLimits.ts` 第 49 行）。超限时将最大的结果继续 offload 到磁盘。
@@ -131,15 +163,21 @@ type ContentReplacementState = {
 ```
 一旦某个工具结果被 offload，其决策被永久冻结（`seenIds`），后续轮次通过 `replacements` Map 直接 re-apply，不重复判断。Session 恢复时从 transcript 的 `ContentReplacementRecord` 条目重建状态。
 
-**阶段 3 — Snip（历史裁剪）**
+**阶段 3 — History Snip（历史裁剪）**
 
 实验特性（`HISTORY_SNIP` feature flag），整条删除旧消息，释放的 token 从 autocompact 阈值中扣除（避免双重计算）。
 
-**阶段 4 — Microcompact → Autocompact**
+**阶段 4 — Microcompact → Context Collapse → Autocompact**
 
-Microcompact（`microCompact.ts`）在每次 API 调用前运行，针对可 compactable 的工具类型（Bash、Grep、Glob、Read、WebFetch、WebSearch、FileEdit、Write——第 41 行）清理旧结果，替换为 `[Old tool result content cleared]`。
+Microcompact（`microCompact.ts`）在每次 API 调用前运行，但不是单一路径：
+- 冷缓存场景优先走 **time-based microcompact**，按时间差清理旧工具结果，替换为 `[Old tool result content cleared]`
+- 热缓存且模型支持 cache editing 时，优先走 **cached microcompact**，通过 API 级 cache edits 删除旧工具结果，不直接改本地 transcript
+
+可 compactable 的工具类型包括 Bash、Grep、Glob、Read、WebFetch、WebSearch、FileEdit、Write（第 41 行）。
 
 Autocompact（`compact.ts`）调 LLM 生成 9 段式结构化摘要，保留最近消息，注入 runtime restore 消息恢复 todo 状态和 active skills。
+
+**Read 的保护链路**：除了 transcript 里的 `Read` tool result，Claude Code 还维护一个独立的 `readFileState`。compact 时会先清空旧的 read cache，再按最近访问顺序把一部分文件重新注入 post-compact attachments。它保护的是“最近工作集”，不是“所有历史读取文件”。
 
 ### 2.4 决策流程
 
@@ -164,9 +202,11 @@ Autocompact（`compact.ts`）调 LLM 生成 9 段式结构化摘要，保留最�
 
 3. **水位线是 buffer-based 而非 percentage-based**。用固定 token 数（13k、20k）而非百分比来定义水位线，这样在不同大小的上下文窗口下行为更可预测。
 
-4. **分层策略有优先级**：先跑轻量策略（microcompact），不够再用重策略（autocompact）。但 Claude Code 也在实验 Context Collapse 这种渐进式归档方案。
+4. **分层策略是流水线，而不是互斥选择**：先跑工具结果预算，再跑 preview strip，再跑 microcompact，再尝试 context collapse，最后才决定是否需要 autocompact。
 
-5. **可 compactable 的工具类型是白名单制的**。不是所有工具结果都可以随意清理，只有输出密度低的工具（read、bash、grep 等）才列入白名单。结构化工具（todo、skill）的结果永远不能丢。
+5. **可 compactable 的工具类型是白名单制的**。不是所有工具结果都可以随意清理，只有输出密度低、且对当前推理链路不敏感的工具才列入白名单。需要注意：Claude Code 的白名单里包含 `Read`，但 harness V1 在这里会有意偏离，把 `read_file` 从常规 microcompact 白名单中拿出来，改为通过 working set 保护和 compact 后恢复来治理。
+
+6. **`Read` 不是普通大输出，而是带保护的 working context**。Claude Code 没有保证“读过几十个文件后永远不丢前文细节”，但它通过 `Infinity` 持久化豁免、自身 token 上限、重复读取去重、`readFileState` 和 compact 后最近文件恢复，尽量保住最近工作集。
 
 ---
 
@@ -186,13 +226,15 @@ Autocompact（`compact.ts`）调 LLM 生成 9 段式结构化摘要，保留最�
 │                                                         │
 │  3. governor.assess(...)                  ← 水位评估     │
 │     → 计算水位线                                        │
-│     → 选择并执行策略 (Snip / Microcompact / Auto-compact)│
+│     → 顺序执行策略 (Budget → PreviewStrip → Microcompact │
+│       → Auto-compact)                                   │
 │     → 返回 PreparedQueryContext                         │
 │                                                         │
 │  4. view_builder.build(prepared)          ← 最终组装    │
 │     → ModelInputView                                    │
 │                                                         │
 │  5. model_gateway.call_once(...)          ← 发送请求    │
+│     → 发送前如命中 blocking gate，先本地抢救             │
 │     → 如果 prompt_too_long: governor.reactive_recover() │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -205,9 +247,10 @@ Autocompact（`compact.ts`）调 LLM 生成 9 段式结构化摘要，保留最�
 
 职责：
 - 计算当前水位（总 token 用量 + stable overhead）
-- 根据水位线选择策略（Snip / Microcompact / Auto-compact）
-- 编排策略执行（elif 互斥，只执行最匹配当前水位的那一层）
+- 根据水位线决定哪些治理步骤要执行
+- 按固定流水线编排策略执行（Budget → PreviewStrip → Microcompact → Auto-compact）
 - 管理熔断器（Auto-compact 连续失败后停止）
+- 在发送前执行 blocking gate，避免把必然失败的超长请求发给模型
 - 提供 `reactive_recover` 处理 `prompt_too_long` 紧急抢救
 - 返回 `PreparedQueryContext`
 
@@ -224,6 +267,8 @@ Autocompact（`compact.ts`）调 LLM 生成 9 段式结构化摘要，保留最�
 - `maybe_persist(tool_use_id, content, tool_name)` — 工具执行完立即调用
 - `enforce_per_message_budget(messages)` — 每次查询前调用，确保同轮多个工具结果总和不超过 200,000 字符
 
+注意：`ToolResultOffloader` 只处理 **ephemeral outputs**。`read_file` 不走这里的通用大结果 offload 路径。
+
 #### ContentReplacementState（`core/session/content_replacement.py`）
 
 冻结的替换决策状态。挂载在 `SessionState` 上，跨轮次持久。
@@ -235,20 +280,30 @@ class ContentReplacementState:
     replacements: dict[str, str] # tool_use_id → <persisted-output> 字符串
 ```
 
+#### Working Context（`read_file_state`）
+
+`read_file` 不应被建模为“普通 tool result”，而应被建模为 **working context**。它代表模型当前为了做跨文件推理而读过的材料。
+
+一期设计沿用现有 `SessionState.read_file_state` 字段，但语义上提升为受保护的工作集：
+- 记录最近读过的文件路径、范围、完整/局部读取状态、时间戳
+- 为 compact 后恢复提供输入
+- 不参与通用大结果 offload
+- 不在常规 microcompact 中优先清理
+
 #### 策略模块
 
-- `core/session/snip.py` — Snip 策略
+- `core/session/preview_strip.py` — PreviewStrip 策略（压缩 `<persisted-output>` 预览）
 - `core/session/microcompact.py` — Microcompact 策略（从 `compact_service.py` 迁出）
 - `core/session/compact_service.py` — 精简为只保留 `summarize_and_compact` 和 `build_runtime_restore_messages`
 
 ### 3.3 水位线体系
 
-基于 Claude Code 的三层水位线扩展，加入 Snip 层：
+基于 Claude Code 的阈值体系扩展，加入 PreviewStrip 和 pre-send blocking gate：
 
 ```python
 # 常量定义
 EFFECTIVE_CONTEXT_WINDOW = context_window_tokens - max_output_tokens
-SNIP_THRESHOLD          = EFFECTIVE_CONTEXT_WINDOW - 40_000
+PREVIEW_STRIP_THRESHOLD = EFFECTIVE_CONTEXT_WINDOW - 40_000
 MICROCOMPACT_THRESHOLD  = EFFECTIVE_CONTEXT_WINDOW - 20_000
 AUTOCOMPACT_THRESHOLD   = EFFECTIVE_CONTEXT_WINDOW - 13_000
 BLOCKING_LIMIT          = EFFECTIVE_CONTEXT_WINDOW - 3_000
@@ -258,10 +313,10 @@ BLOCKING_LIMIT          = EFFECTIVE_CONTEXT_WINDOW - 3_000
 
 | 水位线 | 触发值 | 策略 | 力度 |
 |---|---|---|---|
-| `SNIP_THRESHOLD` | ~150k | Snip | 压缩 `<persisted-output>` 标签，去掉预览只留路径 |
+| `PREVIEW_STRIP_THRESHOLD` | ~150k | PreviewStrip | 压缩 `<persisted-output>` 标签，去掉预览只留路径 |
 | `MICROCOMPACT_THRESHOLD` | ~170k | Microcompact | 清理旧工具结果 + 已 offload 结果深度压缩 |
 | `AUTOCOMPACT_THRESHOLD` | ~177k | Auto-compact | LLM 摘要替换历史 |
-| `BLOCKING_LIMIT` | ~187k | 阻断 | 拒绝发请求，必须先抢救 |
+| `BLOCKING_LIMIT` | ~187k | 阻断 | 发送前拒绝构建最终请求，必须先抢救 |
 
 水位计算：
 
@@ -279,9 +334,25 @@ def _calc_water_level(self, session_state) -> int:
 
 ### 3.4 策略详细设计
 
-#### Snip（轻量裁剪）
+#### 工具输出分类
 
-**触发条件**：水位 >= SNIP_THRESHOLD 且 < MICROCOMPACT_THRESHOLD
+为了避免把所有工具结果一视同仁地治理，一期把工具结果分成三类：
+
+1. **Ephemeral outputs**
+   例如 `bash`、`web_fetch`、`web_search`、大错误日志。
+   这类结果优先进入 offload / preview strip / microcompact 流水线。
+
+2. **Working context**
+   主要是 `read_file`。
+   这类结果是模型当前做推理的材料，不走通用 offload，常规 microcompact 也不应优先清理。
+
+3. **Structured state**
+   例如 `todo`、`skill`。
+   这类结果短但语义强，不应被压缩成普通占位符。
+
+#### PreviewStrip（轻量裁剪）
+
+**触发条件**：水位 >= PREVIEW_STRIP_THRESHOLD
 
 **做什么**：遍历 transcript 中所有包含 `<persisted-output>` 标签的工具结果消息，将其进一步压缩——去掉 preview 部分，只保留路径引用。
 
@@ -300,6 +371,8 @@ Preview (first 2KB):
 
 **释放量**：每条大约节省 1-2KB。一轮有 5-10 个工具调用时，积少成多。
 
+**命名说明**：这里故意不用 `Snip` 命名。Claude Code 里的 `HISTORY_SNIP` 是删除旧消息组的历史裁剪机制，而这里做的是对已 offload 结果的预览瘦身，两者不是一回事，避免概念混用。
+
 **关键约束**：
 - 只处理已经被 offload 过的工具结果（有 `<persisted-output>` 标签的），不碰未 offload 的内容
 - 不改变消息结构，只替换 content 字符串
@@ -307,7 +380,7 @@ Preview (first 2KB):
 
 #### Microcompact（旧工具清理）
 
-**触发条件**：水位 >= MICROCOMPACT_THRESHOLD 且 < AUTOCOMPACT_THRESHOLD
+**触发条件**：满足 Microcompact 运行条件时执行；是否真正生效取决于缓存状态、query source 和工具类型。它不是简单的“高于某个水位才运行”的互斥策略，而是治理流水线中的一环。
 
 **两种子策略**：
 
@@ -315,20 +388,27 @@ Preview (first 2KB):
 - 超过 `age_cutoff_seconds`（默认 1800s）的 compactable 工具结果
 - 不在最近 `keep_recent_trajectories`（默认 2）轮中的
 - 内容替换为 `[Old tool result content cleared]`
+- 只在明确判断为冷缓存时触发；目的是在“反正要 cache miss”的前提下，缩小本轮真正要重写的 prompt
 
-可 compactable 的工具白名单：`read_file`, `bash`, `find`, `grep`, `glob`, `web_fetch`, `web_search`, `write_file`。这些工具的输出天然具有"可重新获取"的特性——文件可以重新读、命令可以重新跑、搜索可以重新做。
+可 compactable 的工具白名单：`bash`, `find`, `grep`, `glob`, `web_fetch`, `web_search`, `write_file`。这些工具的输出天然具有"可重新获取"的特性——命令可以重新跑、搜索可以重新做、网页可以重新抓取、写入确认消息本身信息密度也较低。
+
+`read_file` 不进入这个常规白名单。理由：
+- 模型连续读取几十个文件时，前面读过的内容往往仍在当前推理链路里
+- 如果把前面的 `read_file` 结果像日志一样清掉，容易出现“读了前二十个文件，再读后面的时忘了前面的具体内容”
+- 一期设计里，`read_file` 应优先通过 working set 和 compact 后恢复机制来治理，而不是直接清占位符
 
 不可 compactable 的工具：`todo`、`skill` 等结构化工具——它们的结果短且有结构意义，清理后会导致状态丢失。
 
-**策略 B — 已 offload 结果的深度清理**：
-- 对于已经被 offload 到文件的结果（有 `<persisted-output>` 或已 snip 的标签），可以做更激进的压缩
-- 将 `<persisted-output>` 标签直接替换为单行路径引用（和 Snip 一样的效果，但此时是对所有 offload 结果执行，不限于最旧的）
-- 或者对于非常旧的结果，将整个 tool_result 消息的内容设为空字符串（保留消息结构以维护 API 配对）
+**策略 B — Cache-aware microcompact**：
+- 如果底层模型/API 支持 cache editing，则优先使用缓存友好的删除路径
+- 这种路径不直接修改本地 transcript，而是向 API 注入 cache edits
+- 优点是能释放上下文压力，同时尽量不打断 prompt cache
 
 ```python
 def _run_microcompact(self, messages):
+    if self._can_use_cached_microcompact(messages):
+        return self._run_cached_microcompact(messages)
     messages = self._time_based_clear(messages)
-    messages = self._offloaded_result_compact(messages)
     return messages
 ```
 
@@ -341,6 +421,23 @@ def _run_microcompact(self, messages):
 2. 用摘要替换旧消息，保留最近 4 条
 3. 注入 runtime restore 消息（todo state、active skills、最近读过的文件）
 4. 带熔断器：3 次连续失败后停止，60s 冷却期
+
+对于 `read_file`，Auto-compact 不要求保留所有历史读取全文，而是保留“最近 working set 可继续工作”的最小闭环：
+- 最近访问的少量文件
+- 每个文件受单文件 token 上限约束
+- 已在 preserved tail 中的读取结果不重复注入
+
+#### Blocking Gate（发送前阻断）
+
+**触发条件**：水位 >= BLOCKING_LIMIT
+
+**做什么**：
+1. 不直接发送模型请求
+2. 先本地执行最激进的可逆治理步骤：PreviewStrip、Microcompact、必要时 Auto-compact
+3. 重新估算水位
+4. 只有降回 `BLOCKING_LIMIT` 以下，才允许真正调用模型
+
+如果连续抢救后仍然无法降到安全范围，直接返回一条本地错误/状态消息，而不是把一个必然 `prompt_too_long` 的请求发出去。
 
 **与现有代码的关系**：`_summarize_with_breaker`、`_mark_summary_failure`、`_mark_summary_success`、`_summary_breaker_open` 全部迁入 Governor，逻辑不变。
 
@@ -386,6 +483,7 @@ def maybe_persist(self, tool_use_id: str, content: str, tool_name: str) -> str:
 每个工具的 offload 阈值：
 - 默认：`DEFAULT_MAX_RESULT_SIZE_CHARS = 50_000`（参考 Claude Code `toolLimits.ts` 第 13 行）
 - `bash`：额外有 `BASH_MAX_OUTPUT_DEFAULT = 30_000` 的预执行限制
+- `read_file`：`Infinity`，不走通用 offload，而是依赖自身读取 token 上限和 `read_file_state`
 - `todo`、`skill` 等结构化工具：阈值为 `Infinity`（永远不 offload）
 
 #### 聚合预算
@@ -397,10 +495,13 @@ def enforce_per_message_budget(self, messages: list[dict]) -> list[dict]:
     budget = 200_000  # MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
     # 按 API 消息分组（同一轮的多个 tool_result 属于同一个 user message）
     # 对每组的 tool_result 按大小排序
+    # 跳过 read_file / todo / skill 这类不应走通用替换的结果
     # 冻结已决策的（seen_ids 中的直接 re-apply）
     # 新的超限结果：offload 最大的几条直到总额在预算内
     return messages
 ```
+
+`read_file` 在这里应被明确排除。否则同一轮读很多文件时，系统可能会把前面读过的文件结果替换成路径/占位符，破坏跨文件分析的连续性。
 
 #### 冻结状态管理
 
@@ -420,20 +521,48 @@ class ContentReplacementState:
 1. 先对 `seen_ids` 中的结果 re-apply 冻结的替换（保证一致性）
 2. 再对新结果做 offload 决策
 
-Session 恢复时从 transcript 的 meta 记录重建状态。
+但真正的契约不止于此，还需要显式记录：
+- **seen but unreplaced**：某些结果曾被看过，但当时没有替换；后续也不能再替换，否则会破坏历史前缀一致性
+- **replacement records**：持久化的不是“重新推导规则”，而是模型实际见过的替换字符串
+- **resume reconstruction**：会话恢复时，从 transcript 中重建 `seen_ids` 和 `replacements`
+- **fork/subagent inheritance**：共享前缀缓存的子线程需要克隆父线程的 replacement state，而不是重新决策
+
+建议 transcript 中增加显式记录：
+
+```python
+@dataclass
+class ContentReplacementRecord:
+    kind: Literal["tool-result"]
+    tool_use_id: str
+    replacement: str
+```
 
 #### 文件目录
 
 ```
-<project_root>/.harness/tool-results/<toolUseId>.txt
+<project_root>/.harness/sessions/<session_id>/tool-results/<toolUseId>.txt
 ```
 
-简洁的单层目录，不嵌套 session 子目录。原因：
-- harness 一次只有一个活跃 session
-- 不需要跨 session 隔离
-- 文件名中已包含唯一的 toolUseId
+按 session 分层。原因：
+- 便于 resume / replay / 审计
+- 便于并发会话隔离
+- 便于按 session 做清理和 retention
+- 避免单层目录长期积累垃圾文件
 
 清理策略：30 天默认保留，不做主动清理。
+
+### 3.5.1 `read_file` 的工作集治理
+
+`read_file` 的治理目标不是“尽快压出去”，而是“在读很多文件时尽量保住最近工作集”。
+
+一期采用最小策略：
+- `read_file` 不走通用大结果 offload
+- `read_file` 不进入常规 microcompact 清理白名单
+- `SessionState.read_file_state` 继续维护最近读过的文件内容与范围
+- Auto-compact 后，根据 `read_file_state` 重新注入最近访问的少量文件
+- 如果 preserved tail 已经保留了某个文件的 Read 结果，则不重复恢复
+
+这仍然不能保证“读过几十个文件后，一个字都不忘”，但它能避免最糟糕的情况：把 `read_file` 当作普通日志一样立即清空。
 
 ### 3.6 ContextGovernor 核心流程
 
@@ -496,16 +625,29 @@ class ContextGovernor:
             "steps": steps,
         }
 
-        # 按水位线选择策略（elif 互斥）
+        # 轻量策略按流水线叠加执行，不互斥
+        if water_level >= effective_window - PREVIEW_STRIP_BUFFER:
+            observability["strategies_run"].append("preview_strip")
+            messages = self._run_preview_strip(messages, observability)
+
+        # read_file working set 受保护，不参与常规 preview/offload 清理
+        messages = self._protect_read_working_set(messages, session_state)
+
+        messages = self._run_microcompact(messages, session_state, observability)
+        if observability.get("microcompact_effective"):
+            observability["strategies_run"].append("microcompact")
+
+        # 重新估算，决定是否还需要重策略
+        water_level = self._recalc_water_level(messages)
         if water_level >= effective_window - AUTOCOMPACT_BUFFER:
             observability["strategies_run"].append("auto_compact")
             messages = self._run_auto_compact(messages, session_state, store, observability)
-        elif water_level >= effective_window - MICROCOMPACT_BUFFER:
-            observability["strategies_run"].append("microcompact")
-            messages = self._run_microcompact(messages, session_state, observability)
-        elif water_level >= effective_window - SNIP_BUFFER:
-            observability["strategies_run"].append("snip")
-            messages = self._run_snip(messages, observability)
+
+        # 发送前 blocking gate
+        water_level = self._recalc_water_level(messages)
+        if water_level >= effective_window - BLOCKING_BUFFER:
+            observability["strategies_run"].append("blocking_gate")
+            messages = self._run_blocking_recover(messages, session_state, store, observability)
 
         # 更新可观测性
         observability["after_tokens"] = estimate_messages_tokens(messages)
@@ -526,11 +668,11 @@ class ContextGovernor:
         )
 ```
 
-策略选择是 `elif` 而非独立 `if`：如果触发了 Auto-compact，上下文已被大幅压缩，不需要再跑 Snip/Microcompact。只执行最匹配当前水位的那一层策略。
+策略执行采用固定流水线，而不是 `elif` 互斥分支：轻量治理步骤先尽量削峰，只有在仍然高压时才进入 Auto-compact 和 blocking gate。
 
 ### 3.7 Reactive Recover
 
-处理 API 返回 `prompt_too_long` 时的紧急抢救：
+处理 API 返回 `prompt_too_long` 时的紧急抢救。注意它是 **blocking gate 之后的兜底**，不是主要治理路径：
 
 ```python
 def reactive_recover(self, *, session_state, run_state, store, **kwargs) -> PreparedQueryContext:
@@ -561,7 +703,7 @@ class SessionState:
 ```
 
 `SessionStore` 新增：
-- `tool_result_dir: Path` 属性，指向 `.harness/tool-results/`，在 `bootstrap()` 时自动创建
+- `tool_result_dir: Path` 属性，指向 `.harness/sessions/<session_id>/tool-results/`，在 `bootstrap()` 时自动创建
 
 ### 3.9 QueryLoop 调用链变更
 
@@ -577,11 +719,13 @@ class QueryLoop:
         # 工具结果即时 offload（新增）
         for msg in batch.messages:
             if msg.get("role") == "tool" and msg.get("tool_call_id"):
-                msg["content"] = offloader.maybe_persist(
-                    msg["tool_call_id"],
-                    msg["content"],
-                    tool_name=...,  # 从 tool_calls 中查找
-                )
+                tool_name = ...  # 从 tool_calls 中查找
+                if tool_name != "read_file":
+                    msg["content"] = offloader.maybe_persist(
+                        msg["tool_call_id"],
+                        msg["content"],
+                        tool_name=tool_name,
+                    )
 
         # Governor 水位评估
         prepared = governor.assess(...)
@@ -590,6 +734,7 @@ class QueryLoop:
         view = view_builder.build(prepared, run_state=state)
 
         # API 调用
+        # assess 内部已执行 blocking gate，理论上只会发送安全请求
         response = model_gateway.call_once(...)
 
         # 如果 prompt_too_long: reactive recover
@@ -624,9 +769,10 @@ class QueryLoop:
 
 渲染层（Renderer）根据水位线显示不同的状态消息：
 - **正常水位**（无策略触发）→ 无状态消息
-- **SNIP** → "上下文整理: 已压缩工具输出"
+- **PREVIEW_STRIP** → "上下文整理: 已压缩工具输出"
 - **MICROCOMPACT** → "上下文整理: 已清理旧工具结果"
 - **AUTO_COMPACT** → "上下文压缩: 已生成摘要"
+- **READ WORKING SET RESTORED** → "上下文恢复: 已恢复最近读取文件"
 
 ---
 
@@ -637,10 +783,11 @@ class QueryLoop:
 | 组件 | 测试重点 | 测试文件 |
 |---|---|---|
 | `ToolResultOffloader` | 阈值判断、文件写入、预览生成、替换状态冻结、re-apply 一致性 | `test_offloader.py` |
+| `read_file working set` | `read_file` 不走通用 offload、compact 后最近文件恢复、preserved tail 去重 | `test_read_working_set.py` |
 | `ContentReplacementState` | session 恢复后状态重建、冻结决策不可逆 | `test_content_replacement.py` |
-| `Snip` | 压缩 `<persisted-output>` 标签、不影响非 offload 内容、替换状态同步更新 | `test_snip.py` |
-| `Microcompact` | 时间窗口判断、可 compactable 工具过滤、API 配对保持、已 offload 结果深度清理 | `test_microcompact.py` |
-| `ContextGovernor` | 水位线计算、策略选择逻辑、elif 互斥、reactive recover、熔断器 | `test_governor.py` |
+| `PreviewStrip` | 压缩 `<persisted-output>` 标签、不影响非 offload 内容、替换状态同步更新 | `test_preview_strip.py` |
+| `Microcompact` | 时间窗口判断、可 compactable 工具过滤、API 配对保持、跳过 `read_file` working context | `test_microcompact.py` |
+| `ContextGovernor` | 水位线计算、流水线策略执行、blocking gate、reactive recover、熔断器 | `test_governor.py` |
 | 集成测试 | QueryLoop 全流程（工具结果 offload → Governor → View）、reactive recover 路径 | `test_query_display.py`, `test_query_logging.py` |
 
 测试中 `ToolResultOffloader` 使用 `tmp_path` 替代真实目录，`ContextGovernor` 注入 fake 策略实现。
@@ -655,11 +802,12 @@ class QueryLoop:
 |---|---|
 | `core/session/governor.py` | ContextGovernor：水位线 + 策略调度 |
 | `core/session/offloader.py` | ToolResultOffloader：offload + 预算 |
-| `core/session/snip.py` | Snip 策略实现 |
+| `core/session/read_working_set.py` | `read_file` 工作集保护与 compact 后恢复逻辑 |
+| `core/session/preview_strip.py` | PreviewStrip 策略实现 |
 | `core/session/microcompact.py` | Microcompact 策略实现（从 compact_service 迁出） |
 | `core/session/content_replacement.py` | ContentReplacementState 数据类 |
 
-对应测试文件：`test_governor.py`、`test_offloader.py`、`test_snip.py`、`test_microcompact.py`、`test_content_replacement.py`
+对应测试文件：`test_governor.py`、`test_offloader.py`、`test_read_working_set.py`、`test_preview_strip.py`、`test_microcompact.py`、`test_content_replacement.py`
 
 ### 6.2 删除文件
 
@@ -672,46 +820,182 @@ class QueryLoop:
 
 | 文件 | 变化 | 原因 |
 |---|---|---|
-| `core/session/compact_service.py` | 删除 `apply_tool_result_budget` 和 `apply_time_based_microcompact`，只保留 `summarize_and_compact` 和 `build_runtime_restore_messages` | 函数迁入新模块 |
+| `core/session/compact_service.py` | 删除 `apply_tool_result_budget` 和 `apply_time_based_microcompact`，只保留 `summarize_and_compact` 和 `build_runtime_restore_messages`，并补 `read_file` working set 恢复 | 函数迁入新模块 |
 | `core/session/token_budget.py` | `should_trigger_summary_compact` 替换为水位线计算函数 `calc_water_level` | 水位线体系替代单一阈值 |
 | `core/session/state.py` | 新增 `session_id: str` 和 `content_replacement_state: ContentReplacementState` 字段 | Session 基础设施 |
-| `core/session/store.py` | 新增 `tool_result_dir: Path` 属性，`bootstrap()` 时创建 `.harness/tool-results/` 目录 | offload 目录管理 |
+| `core/session/store.py` | 新增 `tool_result_dir: Path` 属性，`bootstrap()` 时创建 `.harness/sessions/<session_id>/tool-results/` 目录 | offload 目录管理 |
 | `core/session/__init__.py` | 导出更新：移除 ContextManager，新增 ContextGovernor、ToolResultOffloader 等 | 新模块导出 |
 | `core/query/loop.py` | `context_manager` 参数改为 `governor`，新增 `offloader` 参数和调用点 | 接口变更 |
 | `core/session/engine.py` | `context_manager` 改为 `governor`，注入 `offloader` | 接口变更 |
+| `core/session/view_builder.py` | 模块说明和接口文案从 ContextManager 改为 ContextGovernor / PreparedQueryContext | 适配新数据流命名 |
 | `tests/test_query_display.py` | `FakeContextManager` → `FakeGovernor` | 适配新接口 |
 | `tests/test_query_logging.py` | `FakeContextManager` → `FakeGovernor` | 适配新接口 |
 | `tests/session/test_engine_commands.py` | 适配新接口 | 适配新接口 |
+| `tests/session/test_compact_service.py` | 拆分 `apply_tool_result_budget` / `apply_time_based_microcompact` 相关测试，补充 Governor / Offloader / PreviewStrip 测试 | 测试随模块迁移 |
+| `tests/session/test_token_budget.py` | 从单一 `should_trigger_summary_compact` 迁移到水位线计算与校准逻辑测试 | 适配水位线体系 |
 
 ### 6.4 保留不动
 
 | 文件 | 原因 |
 |---|---|
 | `core/session/query_context.py` | `PreparedQueryContext` 和 `ContextBlock` 继续使用 |
-| `core/session/view_builder.py` | 不需要再动 |
 | `core/prompt/assembler.py` | `build_stable_tools` / `build_runtime_blocks` 继续使用 |
 
 ---
 
-## 7. 未来扩展
+## 7. V2 设计（行为 / 流程级）
 
-### 7.1 Context Collapse（后续）
+### 7.1 V2 目标与边界
 
-Context Collapse 是 Claude Code 正在实验的渐进式归档方案。它维护一个 commit log，压力增大时逐步 commit 归档消息。在 90% 水位时 commit，95% 时进入 blocking spawn 流程。
+V1 解决的是“不要直接爆窗”；V2 解决的是“在高压区尽量不要立刻走全量摘要替换”。
 
-当 harness 需要实现 Context Collapse 时，只需在 Governor 中加一层判断：
+V2 的核心目标有三个：
 
-```python
-if water_level >= COLLAPSE_THRESHOLD:
-    messages = self._run_context_collapse(messages, ...)
+1. **减少 Auto-compact 触发频率**：让更多高压场景在进入全量摘要前就被中层治理吸收掉
+2. **降低 transcript 破坏性**：优先采用归档、cache edit、本地会话记忆，而不是直接把大量历史替换成一段摘要
+3. **提升连续性**：让模型在继续工作时，仍然能通过本地 artifact 和会话记忆回到关键上下文
+
+V2 只新增三类能力：
+
+- Context Collapse
+- cache-aware microcompact
+- session memory compact
+
+不在 V2 范围内：
+
+- artifact-aware runtime 的完整体系化设计
+- 跨会话外部记忆检索
+- 中断恢复 / 恢复到未完成 turn
+
+### 7.2 V2 在 Runtime Pipeline 中的位置
+
+V2 不是推翻 V1，而是在 V1 流水线中插入两层中间治理：
+
+```text
+V1:
+Budget → PreviewStrip → Microcompact → Auto-compact → Blocking Gate
+
+V2:
+Budget → PreviewStrip → Microcompact
+      → Context Collapse
+      → Session Memory Compact / Auto-compact
+      → Blocking Gate
 ```
 
-不需要重构现有的 Snip/Microcompact/Auto-compact 逻辑。
+其中，Microcompact 在 V2 中优先尝试 cache-aware 路径：
 
-### 7.2 缓存友好的 Microcompact
+```text
+Microcompact
+  ├─ cached path（支持 cache editing 时优先）
+  └─ transcript path（不支持时回退到 V1 的时间清理）
+```
 
-Claude Code 有一种基于 cache-editing API 的 microcompact（`cachedMicrocompact`），可以在不破坏 prompt cache 的情况下删除工具结果。当 harness 接入支持 cache-editing 的 API 时，可以在 Microcompact 中增加这个路径。
+整体原则：
 
-### 7.3 Session Memory Compact
+- 轻策略仍然先跑，V2 不是把重策略提前
+- Context Collapse 负责“归档旧上下文”，不是生成最终摘要
+- Session Memory Compact 负责“用本地记忆压缩已归档内容”，不是取代全部 compact 逻辑
+- 如果前面几层仍然压不下来，才回退到现有 Auto-compact
 
-Claude Code 的 session memory compact 用本地生成的会话记忆替代 LLM 摘要，零 API 调用。当 harness 实现会话记忆功能时，可以在 Auto-compact 中优先尝试这个路径。
+### 7.3 V2 运行流程
+
+当一次请求进入 Governor，高压处理顺序应改为：
+
+1. **Budget / PreviewStrip / Microcompact 先执行**
+   - 与 V1 一致
+   - 不同点是 Microcompact 优先走 cache-aware path
+
+2. **如果水位仍高于 Collapse 触发线，执行 Context Collapse**
+   - 选择“足够旧、语义上可归档”的消息段
+   - 把这段消息写入本地 collapse log / archive artifact
+   - transcript 中不再保留完整原文，而替换为一条轻量归档引用块
+   - preserved tail、用户最近目标、todo、active skills、`read_file` 最近 working set 不进入 collapse 候选
+
+3. **重新估算水位**
+   - 如果 collapse 后已经回到安全区，直接继续构建请求
+   - 如果仍然处于高压区，进入 Session Memory Compact / Auto-compact 判定
+
+4. **优先尝试 Session Memory Compact**
+   - 从 collapse log、tool-result artifacts、working set 元数据生成本地会话记忆
+   - 用这份本地记忆替换较重的归档引用块或旧摘要块
+   - 成功则继续工作，不调用摘要 LLM
+
+5. **本地记忆不足或效果不够时，才回退到 Auto-compact**
+   - 仍然保留 V1 的熔断器
+   - 仍然保留最近 preserved tail 和 runtime restore
+
+6. **最后由 Blocking Gate 兜底**
+   - 如果前面几层都做完仍然过高，不发送请求
+   - 继续本地抢救，或者直接返回本地状态消息
+
+### 7.4 Context Collapse 的行为定义
+
+Context Collapse 在 V2 中不是“再做一次摘要”，而是“把旧上下文从主 transcript 挪到本地归档层”。
+
+它的行为应满足以下约束：
+
+- **输入**：当前 transcript、归档日志状态、preserved tail、working context 保护名单
+- **选择对象**：优先选择较旧的 assistant / tool / user 消息段，且这些消息段已经脱离当前直接推理链路
+- **输出一**：本地 collapse log，记录被归档的消息段、时间、来源范围、关键锚点
+- **输出二**：transcript 中的 collapse reference block，告诉模型“这段上下文已归档，可在需要时通过本地 artifact 回放”
+- **不碰的内容**：最近消息尾部、todo、active skills、`read_file` 最近 working set、最近错误上下文、用户的当前目标约束
+
+它解决的问题不是“把 token 变少”这么简单，而是把“旧但可能仍有价值的上下文”从主工作区移到可回放的归档区，避免一上来就被全量摘要抹平。
+
+### 7.5 Cache-aware Microcompact 的行为定义
+
+V2 的 Microcompact 先判断底层 API 是否支持 cache editing：
+
+- **支持时**
+  - 优先产生 cache edit 指令
+  - 不直接改写本地 transcript
+  - 目标是释放本轮 prompt 压力，同时尽量保持历史前缀稳定
+
+- **不支持时**
+  - 回退到 V1 的 transcript-based time microcompact
+  - 行为与 V1 一致
+
+这层的关键不是“删更多”，而是“在删的同时少破坏 cache”。因此它仍然只处理 compactable 的 ephemeral outputs，不扩展到 `read_file` working context。
+
+### 7.6 Session Memory Compact 的行为定义
+
+Session Memory Compact 是 V2 的“本地重策略”，定位在 Context Collapse 之后、Auto-compact 之前。
+
+它的处理顺序应是：
+
+1. 从本地 collapse log 提取已归档上下文
+2. 合并工具结果 artifact 的轻量索引
+3. 合并 `read_file` working set 的最近锚点信息
+4. 生成结构化 session memory
+5. 用 session memory 替换较重的旧归档引用块或旧压缩块
+
+它与 V1 Auto-compact 的区别：
+
+- **V1 Auto-compact**：调用 LLM，直接把大量历史改写成一段结构化摘要
+- **V2 Session Memory Compact**：优先基于本地已知材料生成会话记忆，不依赖额外 API 调用
+
+这层的目的，是尽量把“高压后的继续工作”建立在本地会话资产上，而不是每次都重新求助于摘要模型。
+
+### 7.7 与 artifact-aware runtime、外部记忆、中断恢复的关系
+
+这三者都和 V2 有关联，但不在 V2 本次实现范围内。
+
+**artifact-aware runtime**
+
+V2 会为它打基础，但不直接把它做完整：
+
+- V1/V2 已经有 `tool-results/`、collapse log、session memory 这些本地 artifact
+- 后续真正的 artifact-aware runtime，需要再补统一索引、artifact 类型系统、按需回放协议
+- 因此它应被视为 **V2 之后的上层治理体系**，而不是当前 V2 的必做项
+
+**外部记忆**
+
+- V2 的 session memory 只处理单会话内的本地记忆
+- 不做跨会话召回
+- 不做长期用户偏好或项目长期知识库注入
+
+**中断恢复**
+
+- 中断恢复依赖稳定的 artifact、collapse log、session memory、replacement state 重建
+- 但它关注的是“turn 被打断后怎么恢复执行”，不是“当前轮上下文怎么治理”
+- 因此它应放在 V2 之后，作为独立阶段设计
