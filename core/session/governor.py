@@ -9,6 +9,11 @@ from .query_context import ContextBlock, PreparedQueryContext
 from .token_budget import calc_effective_context_window, calc_waterlines, calibrated_input_tokens, estimate_messages_tokens
 
 
+AUTO_COMPACT_KEEP_LAST_MESSAGES = 8   # Normal path: at least 2 full tool cycles
+BLOCKING_GATE_KEEP_LAST_MESSAGES = 4  # Emergency path: more aggressive but at least 1 full cycle
+REASONING_KEEP_RECENT_TURNS = 2      # Keep reasoning for the last N assistant turns only
+
+
 class ContextGovernor:
     def __init__(
         self,
@@ -46,9 +51,17 @@ class ContextGovernor:
             context_window_tokens=self._context_window_tokens,
             max_output_tokens=self._max_output_tokens,
         )
-        water_level, budget = self._calc_water_level(session_state, stable_system, stable_tools, runtime_blocks)
+        # Compute stable overhead once — stable_system/stable_tools may change each turn
+        stable_system_tokens = max(1, len(stable_system) // 4)
+        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
+        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
+        stable_overhead = stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+
+        water_level = self._calc_water_level(session_state, stable_overhead)
         messages = self._offloader.enforce_per_message_budget(messages)
         strategies_run: list[str] = []
+
+        # Strategy 1: PreviewStrip
         if water_level >= waterlines["preview_strip"]:
             messages, changed = strip_persisted_output_previews(
                 messages,
@@ -56,26 +69,42 @@ class ContextGovernor:
             )
             if changed:
                 strategies_run.append("preview_strip")
+
+        # Strategy 2: Microcompact (always runs)
         messages = apply_time_based_microcompact(
             messages,
             age_cutoff_seconds=1800,
             keep_recent_trajectories=2,
         )
         strategies_run.append("microcompact")
+
+        # Strategy 2.5: Strip old reasoning/thinking content
+        # Reasoning text accumulates in every assistant message and can dominate the context.
+        # Keep reasoning for the most recent turns, strip from older ones.
+        messages = self._strip_old_reasoning(messages, keep_recent=REASONING_KEEP_RECENT_TURNS)
+
+        # Recalc water level after light strategies — prevents unnecessary auto_compact
+        water_level = self._recalc_water_level(messages, stable_overhead)
+
+        # Strategy 3: Auto-compact
         if water_level >= waterlines["auto_compact"]:
             messages = self._summarize_with_breaker(
                 messages=messages,
                 session_state=session_state,
-                keep_last_messages=4,
+                keep_last_messages=AUTO_COMPACT_KEEP_LAST_MESSAGES,
             )
             strategies_run.append("auto_compact")
-        if estimate_messages_tokens(messages) >= waterlines["blocking"]:
+
+        # Strategy 4: Blocking gate (pre-send check)
+        water_level = self._recalc_water_level(messages, stable_overhead)
+        if water_level >= waterlines["blocking"]:
             messages = self._run_blocking_recover(
                 messages=messages,
                 session_state=session_state,
                 store=store,
             )
             strategies_run.append("blocking_gate")
+
         observability = {
             "water_level": water_level,
             "water_line": self._water_line_name(water_level, waterlines),
@@ -93,34 +122,59 @@ class ContextGovernor:
             runtime_blocks=all_blocks,
             working_transcript=messages,
             observability=observability,
-            budget=budget,
+            budget={
+                "stable_system_tokens": stable_system_tokens,
+                "stable_tools_tokens": stable_tools_tokens,
+                "required_runtime_tokens": required_runtime_tokens,
+            },
         )
 
-    def _calc_water_level(self, session_state, stable_system: str, stable_tools, runtime_blocks) -> tuple[int, dict[str, int]]:
+    def _calc_water_level(self, session_state, stable_overhead: int) -> int:
         estimated = estimate_messages_tokens(session_state.conversation_messages)
         used = calibrated_input_tokens(
             estimated_tokens=estimated,
             observed_prompt_tokens=session_state.compact_state["last_prompt_tokens"],
         )
-        stable_system_tokens = max(1, len(stable_system) // 4)
-        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
-        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
-        water_level = used + stable_system_tokens + stable_tools_tokens + required_runtime_tokens
-        budget = {
-            "stable_system_tokens": stable_system_tokens,
-            "stable_tools_tokens": stable_tools_tokens,
-            "required_runtime_tokens": required_runtime_tokens,
-        }
-        return water_level, budget
-        estimated = estimate_messages_tokens(session_state.conversation_messages)
+        return used + stable_overhead
+
+    def _recalc_water_level(self, messages: list[dict[str, Any]], stable_overhead: int) -> int:
+        """Re-estimate water level after strategy execution. Prevents unnecessary auto_compact
+        when light strategies (preview_strip + microcompact) already reduced the message size."""
+        estimated = estimate_messages_tokens(messages)
         used = calibrated_input_tokens(
             estimated_tokens=estimated,
-            observed_prompt_tokens=session_state.compact_state["last_prompt_tokens"],
+            observed_prompt_tokens=0,
         )
-        stable_system_tokens = max(1, len(stable_system) // 4)
-        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
-        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
-        return used + stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+        return used + stable_overhead
+
+    def _strip_old_reasoning(self, messages: list[dict[str, Any]], keep_recent: int) -> list[dict[str, Any]]:
+        """Strip reasoning (thinking) text from older assistant messages.
+
+        Reasoning text accumulates across turns and can consume significant context budget.
+        This strategy keeps reasoning for the most recent N assistant turns (where it's most
+        relevant for continuity) and replaces older reasoning with a placeholder.
+        """
+        # Find the indices of the last N assistant messages with reasoning
+        assistant_with_reasoning = []
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant" and msg.get("reasoning"):
+                assistant_with_reasoning.append(i)
+
+        if len(assistant_with_reasoning) <= keep_recent:
+            return messages
+
+        # Indices to strip: all except the last `keep_recent`
+        strip_indices = set(assistant_with_reasoning[:-keep_recent]) if keep_recent > 0 else set(assistant_with_reasoning)
+
+        result = []
+        for i, msg in enumerate(messages):
+            if i in strip_indices:
+                cleaned = dict(msg)
+                cleaned["reasoning"] = "[reasoning stripped]"
+                result.append(cleaned)
+            else:
+                result.append(msg)
+        return result
 
     def _summarize_with_breaker(self, *, messages, session_state, keep_last_messages):
         if self._summary_breaker_open(session_state):
@@ -159,7 +213,7 @@ class ContextGovernor:
             messages,
             state=session_state,
             summary_gateway=self._summary_gateway,
-            keep_last_messages=2,
+            keep_last_messages=BLOCKING_GATE_KEEP_LAST_MESSAGES,
         )
         if store is not None:
             store.replace_working_transcript(compacted)

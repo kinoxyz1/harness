@@ -103,3 +103,4 @@ class SessionState:
     todo_state: TodoState = field(default_factory=TodoState)
     compact_state: dict[str, Any] = field(default_factory=_default_compact_state)
     content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)
+    user_intents: list[str] = field(default_factory=list)

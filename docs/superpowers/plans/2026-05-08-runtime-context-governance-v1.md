@@ -1,5 +1,13 @@
 # Runtime Context Governance V1 Implementation Plan
 
+> **修订说明 (2026-05-09)**：此文档已基于运行时反馈修正。主要改动：
+> 1. **新增 `user_intents` 用户意图保留机制**：auto_compact 后通过 `user_intent_restore` 注入用户原始需求，防止任务目标漂移
+> 2. **`keep_last_messages` 从 4 调整为 8（正常）/ 4（紧急）**：4 条太少，模型只看到 1 轮 tool cycle
+> 3. **新增 `_recalc_water_level`**：策略执行后重算水位，避免轻策略已降水位后仍触发 auto_compact
+> 4. **`compact_service.py` 不再包含 `apply_tool_result_budget` 和 `apply_time_based_microcompact`**
+> 5. **删除 governor.py 中的死代码**（旧版 `_calc_water_level` 残留）
+> 6. **`QueryLoop.run()` 新增 `user_message_content` 参数**：用于追加用户意图到 `session_state.user_intents`
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current `ContextManager`-centric compaction flow with a V1 runtime governor that prevents prompt blowups by offloading large tool results, enforcing per-message budgets, protecting `read_file` working context, and applying layered context governance before model calls.
@@ -194,6 +202,7 @@ class SessionState:
     content_replacement_state: ContentReplacementState = field(
         default_factory=ContentReplacementState
     )
+    user_intents: list[str] = field(default_factory=list)
 ```
 
 ```python
@@ -623,13 +632,64 @@ def collect_recent_read_restore_messages(
 
 ```python
 # core/session/compact_service.py
+from .microcompact import MICROCOMPACT_PLACEHOLDER
 from .read_working_set import collect_recent_read_restore_messages
+
+
+SUMMARY_SYSTEM_PROMPT = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+Write the summary using exactly these 9 sections:
+1. Primary Request and Intent
+2. Key Technical Concepts
+3. Files and Code Sections
+4. Errors and Fixes
+5. Problem Solving
+6. All User Messages
+7. Pending Tasks
+8. Current Work
+9. Optional Next Step
+
+CRITICAL: Output plain text only. No tool calls, no XML, no JSON, no markdown code fences."""
 
 
 def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     restored: list[dict[str, Any]] = []
     kept_messages = kept_messages or []
-    # existing todo_restore and skills_restore blocks stay unchanged
+
+    # 1. 用户意图重播（最高优先级，即使 todo/skill/file 为空也必须存在）
+    if state.user_intents:
+        intent_lines = state.user_intents[-5:]
+        restored.append({
+            "role": "meta_runtime_restore",
+            "kind": "user_intent_restore",
+            "content": "用户原始需求（请严格遵守）：\n" + "\n".join(f"- {intent}" for intent in intent_lines),
+        })
+
+    # 2. todo state restore
+    if state.todo_state.items:
+        todo_lines = [f"- [{item.status}] {item.active_form}" for item in state.todo_state.items]
+        restored.append({
+            "role": "meta_runtime_restore",
+            "kind": "todo_restore",
+            "content": "\n".join(todo_lines),
+        })
+
+    # 3. skills restore
+    if state.invoked_skills:
+        skill_lines = [
+            f"- {skill_id} (turn {record.invoked_at_turn})"
+            for skill_id, record in sorted(
+                state.invoked_skills.items(),
+                key=lambda pair: pair[1].invoked_at_turn,
+            )
+        ]
+        restored.append({
+            "role": "meta_runtime_restore",
+            "kind": "skills_restore",
+            "content": "\n".join(skill_lines),
+        })
+
+    # 4. read_file working set restore
     restored.extend(
         collect_recent_read_restore_messages(
             state,
@@ -637,6 +697,7 @@ def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[d
             limit=3,
         )
     )
+
     return restored
 
 
@@ -653,16 +714,26 @@ def summarize_and_compact(
         base_messages,
         keep_from_index,
     )
-    summary_response = summary_gateway.call_once(
-        base_messages[:keep_from_index],
-        system=SUMMARY_SYSTEM_PROMPT,
-        tools=None,
-        request_options=ModelRequestOptions(
-            query_source="compact",
-            max_output_tokens=1200,
-            thinking_mode="disabled",
-        ),
+    request_options = ModelRequestOptions(
+        query_source="compact",
+        max_output_tokens=1200,
+        thinking_mode="disabled",
     )
+    try:
+        summary_response = summary_gateway.call_once(
+            base_messages[:keep_from_index],
+            system=SUMMARY_SYSTEM_PROMPT,
+            tools=None,
+            request_options=request_options,
+        )
+    except TypeError as exc:
+        if "request_options" not in str(exc):
+            raise
+        summary_response = summary_gateway.call_once(
+            base_messages[:keep_from_index],
+            system=SUMMARY_SYSTEM_PROMPT,
+            tools=None,
+        )
     boundary = create_compact_boundary(
         reason="summary_compact",
         summarized_messages=keep_from_index,
@@ -676,7 +747,34 @@ def summarize_and_compact(
         kept=kept,
         runtime_restore=runtime_restore,
     )
+
+
+def _strip_trailing_runtime_restore(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    end = len(messages)
+    while end > 0 and messages[end - 1].get("role") == "meta_runtime_restore":
+        end -= 1
+    return messages[:end]
+
+
+def _align_keep_start_to_complete_tool_batch(messages: list[dict[str, Any]], keep_from_index: int) -> int:
+    if keep_from_index <= 0 or keep_from_index >= len(messages):
+        return keep_from_index
+    if messages[keep_from_index].get("role") != "tool":
+        return keep_from_index
+
+    batch_start = keep_from_index
+    while batch_start > 0 and messages[batch_start - 1].get("role") == "tool":
+        batch_start -= 1
+
+    if batch_start > 0:
+        assistant = messages[batch_start - 1]
+        if assistant.get("role") == "assistant" and assistant.get("tool_calls"):
+            return batch_start - 1
+
+    return keep_from_index
 ```
+
+**注意**：此文件不再包含 `apply_tool_result_budget` 和 `apply_time_based_microcompact`。这两个函数的逻辑分别迁入 `offloader.py` 和 `microcompact.py`。
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -803,10 +901,9 @@ def _message_created_at(message: dict[str, object]) -> float | None:
 
 ```python
 # core/session/compact_service.py
-from .microcompact import MICROCOMPACT_PLACEHOLDER
-
-# remove apply_time_based_microcompact and COMPACTABLE_TOOLS from this file
-# keep summarize_and_compact and build_runtime_restore_messages only
+# compact_service.py 在 Task 4 中已完成精简，此处无需额外修改。
+# 此文件不再包含 apply_tool_result_budget 和 apply_time_based_microcompact。
+# 只保留 summarize_and_compact 和 build_runtime_restore_messages（含 user_intent_restore）。
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -926,6 +1023,9 @@ from .preview_strip import strip_persisted_output_previews
 from .query_context import ContextBlock, PreparedQueryContext
 from .token_budget import calc_effective_context_window, calc_waterlines, calibrated_input_tokens, estimate_messages_tokens
 
+AUTO_COMPACT_KEEP_LAST_MESSAGES = 8   # 正常路径：至少覆盖 2 轮完整 tool cycle
+BLOCKING_GATE_KEEP_LAST_MESSAGES = 4  # 紧急路径：更激进但至少保留 1 轮完整 cycle
+
 
 class ContextGovernor:
     def __init__(
@@ -964,9 +1064,16 @@ class ContextGovernor:
             context_window_tokens=self._context_window_tokens,
             max_output_tokens=self._max_output_tokens,
         )
-        water_level = self._calc_water_level(session_state, stable_system, stable_tools, runtime_blocks)
+        stable_system_tokens = max(1, len(stable_system) // 4)
+        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
+        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
+        stable_overhead = stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+
+        water_level = self._calc_water_level(session_state, stable_overhead)
         messages = self._offloader.enforce_per_message_budget(messages)
         strategies_run: list[str] = []
+
+        # 策略 1: PreviewStrip
         if water_level >= waterlines["preview_strip"]:
             messages, changed = strip_persisted_output_previews(
                 messages,
@@ -974,26 +1081,37 @@ class ContextGovernor:
             )
             if changed:
                 strategies_run.append("preview_strip")
+
+        # 策略 2: Microcompact（每次都执行）
         messages = apply_time_based_microcompact(
             messages,
             age_cutoff_seconds=1800,
             keep_recent_trajectories=2,
         )
         strategies_run.append("microcompact")
+
+        # 关键：轻策略执行后必须重算水位，避免不必要的 auto_compact
+        water_level = self._recalc_water_level(messages, stable_overhead)
+
+        # 策略 3: Auto-compact
         if water_level >= waterlines["auto_compact"]:
             messages = self._summarize_with_breaker(
                 messages=messages,
                 session_state=session_state,
-                keep_last_messages=4,
+                keep_last_messages=AUTO_COMPACT_KEEP_LAST_MESSAGES,
             )
             strategies_run.append("auto_compact")
-        if estimate_messages_tokens(messages) >= waterlines["blocking"]:
+
+        # 策略 4: Blocking gate（发送前检查）
+        water_level = self._recalc_water_level(messages, stable_overhead)
+        if water_level >= waterlines["blocking"]:
             messages = self._run_blocking_recover(
                 messages=messages,
                 session_state=session_state,
                 store=store,
             )
             strategies_run.append("blocking_gate")
+
         observability = {
             "water_level": water_level,
             "water_line": self._water_line_name(water_level, waterlines),
@@ -1004,30 +1122,141 @@ class ContextGovernor:
         }
         session_state.compact_state["last_compact_observability"] = observability
         run_state.context_observability = observability
+        all_blocks = list(runtime_blocks) + list(overlay_blocks)
         return PreparedQueryContext(
             stable_system=stable_system,
             stable_tools=stable_tools,
-            runtime_blocks=list(runtime_blocks) + list(overlay_blocks),
+            runtime_blocks=all_blocks,
             working_transcript=messages,
             observability=observability,
+            budget={
+                "stable_system_tokens": stable_system_tokens,
+                "stable_tools_tokens": stable_tools_tokens,
+                "required_runtime_tokens": required_runtime_tokens,
+            },
         )
 
-    def _calc_water_level(self, session_state, stable_system: str, stable_tools, runtime_blocks) -> int:
+    def _calc_water_level(self, session_state, stable_overhead: int) -> int:
         estimated = estimate_messages_tokens(session_state.conversation_messages)
         used = calibrated_input_tokens(
             estimated_tokens=estimated,
             observed_prompt_tokens=session_state.compact_state["last_prompt_tokens"],
         )
-        stable_system_tokens = max(1, len(stable_system) // 4)
-        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
-        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
-        return used + stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+        return used + stable_overhead
+
+    def _recalc_water_level(self, messages: list[dict[str, Any]], stable_overhead: int) -> int:
+        """策略执行后重新估算水位。用于判断轻策略是否已足够，避免不必要的 auto_compact。"""
+        estimated = estimate_messages_tokens(messages)
+        used = calibrated_input_tokens(
+            estimated_tokens=estimated,
+            observed_prompt_tokens=0,
+        )
+        return used + stable_overhead
 
     def _summarize_with_breaker(self, *, messages, session_state, keep_last_messages):
-        return self._compact_service.summarize_and_compact(
+        if self._summary_breaker_open(session_state):
+            return messages
+        try:
+            compacted = self._compact_service.summarize_and_compact(
+                messages,
+                state=session_state,
+                summary_gateway=self._summary_gateway,
+                keep_last_messages=keep_last_messages,
+            )
+        except Exception:
+            self._mark_summary_failure(session_state)
+            return messages
+        self._mark_summary_success(session_state)
+        return compacted
+
+    def _summary_breaker_open(self, session_state) -> bool:
+        if session_state.compact_state["consecutive_summary_failures"] < 3:
+            return False
+        return self._time_fn() < session_state.compact_state["summary_compact_cooldown_until"]
+
+    def _mark_summary_failure(self, session_state) -> None:
+        session_state.compact_state["consecutive_summary_failures"] += 1
+        if session_state.compact_state["consecutive_summary_failures"] >= 3:
+            session_state.compact_state["summary_compact_cooldown_until"] = (
+                self._time_fn() + self._summary_breaker_cooldown_seconds
+            )
+
+    def _mark_summary_success(self, session_state) -> None:
+        session_state.compact_state["consecutive_summary_failures"] = 0
+        session_state.compact_state["summary_compact_cooldown_until"] = 0.0
+
+    def _run_blocking_recover(self, *, messages, session_state, store):
+        compacted = self._compact_service.summarize_and_compact(
             messages,
             state=session_state,
             summary_gateway=self._summary_gateway,
+            keep_last_messages=BLOCKING_GATE_KEEP_LAST_MESSAGES,
+        )
+        if store is not None:
+            store.replace_working_transcript(compacted)
+        return compacted
+
+    def reactive_recover(
+        self,
+        *,
+        session_state,
+        run_state,
+        store,
+        stable_system: str = "",
+        stable_tools: list[dict[str, Any]] | None = None,
+        runtime_blocks: list[ContextBlock] | None = None,
+        overlay_blocks: list[ContextBlock] | None = None,
+    ) -> PreparedQueryContext:
+        messages = list(session_state.conversation_messages)
+        messages = self._offloader.enforce_per_message_budget(messages)
+        messages = apply_time_based_microcompact(
+            messages,
+            age_cutoff_seconds=0,
+            keep_recent_trajectories=0,
+        )
+        messages = self._run_blocking_recover(
+            messages=messages,
+            session_state=session_state,
+            store=store,
+        )
+        observability = {
+            "water_level": 0,
+            "water_line": "reactive_recovery",
+            "strategies_run": ["reactive_recovery"],
+            "steps": ["reactive_recovery"],
+            "before_tokens": 0,
+            "after_tokens": estimate_messages_tokens(messages),
+        }
+        session_state.compact_state["last_compact_observability"] = observability
+        run_state.context_observability = observability
+        return PreparedQueryContext(
+            stable_system=stable_system,
+            stable_tools=stable_tools,
+            runtime_blocks=list(runtime_blocks or []) + list(overlay_blocks or []),
+            working_transcript=messages,
+            observability=observability,
+        )
+
+    def _water_line_name(self, water_level: int, waterlines: dict[str, int]) -> str:
+        if water_level >= waterlines["blocking"]:
+            return "blocking"
+        if water_level >= waterlines["auto_compact"]:
+            return "autocompact"
+        if water_level >= waterlines["microcompact"]:
+            return "microcompact"
+        if water_level >= waterlines["preview_strip"]:
+            return "preview_strip"
+        return "normal"
+```
+
+**相比旧版的关键改动**：
+
+1. **`_calc_water_level` 接收 `stable_overhead` 参数而不是 `stable_system/stable_tools/runtime_blocks`**：stable overhead 在 `assess()` 开头一次性计算后传入，避免在 `_calc_water_level` 中重复计算。
+2. **新增 `_recalc_water_level`**：策略执行后重新估算水位。这是设计文档伪代码中存在但旧版实现遗漏的。没有它，preview_strip + microcompact 已经降了水位但仍会触发 auto_compact。
+3. **`keep_last_messages=8`（正常）和 `4`（紧急）**：旧版固定为 4，太少。4 条消息可能只是一组 tool_call + tool_result，模型看不到上一步。8 条至少覆盖 2 轮完整 tool cycle。
+4. **删除 L115-123 的死代码**：旧版 `_calc_water_level` 的旧版返回 `int` 的逻辑残留在 `return (water_level, budget)` 之后。
+5. **`assess()` 返回 `budget` dict**：与设计文档一致，供 view_builder 的 `internal_runtime_view` 使用。
+6. **`reactive_recover` 中 `keep_last_messages` 使用 `BLOCKING_GATE_KEEP_LAST_MESSAGES`**：紧急路径更激进。
             keep_last_messages=keep_last_messages,
         )
 
@@ -1218,9 +1447,15 @@ def run(
     recovery,
     governor,
     offloader,
+    user_message_content: str | None = None,  # 新增：接收用户原始消息
     tools=None,
     renderer=None,
 ):
+    # 新增：在进入循环前，将用户原始意图存入 session_state
+    if user_message_content:
+        session_state.user_intents.append(user_message_content)
+
+    # ... 循环内部 ...
     batch = tool_runtime.execute_batch(
         parsed_calls,
         run_state=state,
@@ -1252,6 +1487,8 @@ def run(
         overlay_blocks=overlay_blocks,
     )
 ```
+
+**注意**：`run()` 方法新增 `user_message_content` 参数。调用方（`SessionEngine.submit_user_message`）需传入用户原始消息文本。此参数仅用于追加到 `session_state.user_intents`，不参与消息流。
 
 ```python
 # core/session/view_builder.py

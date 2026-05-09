@@ -217,6 +217,50 @@ def test_build_runtime_restore_messages_uses_runtime_state_sources() -> None:
     assert "full_read=true" in messages[3]["content"]
 
 
+def test_build_runtime_restore_injects_user_intent_restore_as_first_priority() -> None:
+    state = SessionState(conversation_messages=[])
+    state.user_intents = [
+        "阅读 tests/test.txt 后使用 Python 代码完成答题再优化复杂度",
+        "将结果保存到 ~/Downloads/output.html",
+    ]
+    state.todo_state.items = [
+        TodoItem(content="Implement solution", active_form="Implementing solution", status="in_progress"),
+    ]
+
+    messages = build_runtime_restore_messages(state)
+
+    # user_intent_restore should be the FIRST restore message
+    assert messages[0]["role"] == "meta_runtime_restore"
+    assert messages[0]["kind"] == "user_intent_restore"
+    assert "阅读 tests/test.txt" in messages[0]["content"]
+    assert "~/Downloads/output.html" in messages[0]["content"]
+    # todo_restore comes after
+    assert messages[1]["kind"] == "todo_restore"
+
+
+def test_build_runtime_restore_caps_user_intents_to_last_five() -> None:
+    state = SessionState(conversation_messages=[])
+    state.user_intents = [f"intent-{i}" for i in range(10)]
+
+    messages = build_runtime_restore_messages(state)
+
+    intent_msg = messages[0]
+    assert intent_msg["kind"] == "user_intent_restore"
+    # Should only include last 5 intents
+    assert "intent-5" in intent_msg["content"]
+    assert "intent-9" in intent_msg["content"]
+    assert "intent-4" not in intent_msg["content"]
+
+
+def test_build_runtime_restore_omits_user_intent_when_empty() -> None:
+    state = SessionState(conversation_messages=[])
+    # No user_intents, no todo, no skills, no read_file_state
+
+    messages = build_runtime_restore_messages(state)
+
+    assert messages == []
+
+
 def test_summarize_and_compact_rewrites_transcript_and_restores_runtime() -> None:
     state = SessionState(conversation_messages=[])
     state.todo_state.items = [
@@ -397,4 +441,4 @@ def test_summarize_and_compact_calls_gateway_with_compact_request_options() -> N
     assert gateway.last_call["tools"] is None
     assert gateway.last_call["request_options"].query_source == "compact"
     assert gateway.last_call["request_options"].thinking_mode == "disabled"
-    assert gateway.last_call["request_options"].max_output_tokens == 1200
+    assert gateway.last_call["request_options"].max_output_tokens == 2500

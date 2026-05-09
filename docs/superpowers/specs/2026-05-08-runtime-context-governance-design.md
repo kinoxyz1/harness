@@ -318,19 +318,28 @@ BLOCKING_LIMIT          = EFFECTIVE_CONTEXT_WINDOW - 3_000
 | `AUTOCOMPACT_THRESHOLD` | ~177k | Auto-compact | LLM 摘要替换历史 |
 | `BLOCKING_LIMIT` | ~187k | 阻断 | 发送前拒绝构建最终请求，必须先抢救 |
 
-水位计算：
+水位计算（必须在 `assess()` 内部计算 stable_overhead，不能缓存为实例变量，因为 stable_system / stable_tools 每轮可能不同）：
 
 ```python
-def _calc_water_level(self, session_state) -> int:
+def _calc_water_level(self, session_state, stable_overhead: int) -> int:
     estimated = estimate_messages_tokens(session_state.conversation_messages)
     used = calibrated_input_tokens(
         estimated=estimated,
         observed=session_state.compact_state["last_prompt_tokens"],
     )
-    return used + self._stable_overhead_tokens
+    return used + stable_overhead
+
+def _recalc_water_level(self, messages: list[dict], stable_overhead: int) -> int:
+    """策略执行后重新估算水位。用于判断轻策略是否已足够，避免不必要的 auto_compact。"""
+    estimated = estimate_messages_tokens(messages)
+    used = calibrated_input_tokens(
+        estimated=estimated,
+        observed=0,  # 策略后没有新的 observed prompt_tokens，用估算值
+    )
+    return used + stable_overhead
 ```
 
-`_stable_overhead_tokens` 在每次查询开始时根据 `stable_system + stable_tools + required_runtime_blocks` 计算，确保水位反映真实的总占用。
+**`_recalc_water_level` 为什么是必须的**：没有它，governor 只在策略执行前算一次水位。如果 preview_strip + microcompact 已经把水位降到安全区，governor 仍然会基于旧水位触发 auto_compact——白白做了一次昂贵的 LLM 摘要调用，且摘要本身会导致信息损失。
 
 ### 3.4 策略详细设计
 
@@ -412,17 +421,62 @@ def _run_microcompact(self, messages):
     return messages
 ```
 
+#### 用户意图保留（User Intent Preservation）
+
+**这是 V1 的硬性要求，不是 V2 推迟项。**
+
+设计目标 1.3 节明确提出”哪些绝对不能丢：用户的核心需求”。但在没有显式机制保障的情况下，auto_compact 会把用户原始指令压缩进摘要，而摘要质量不可控。一旦摘要丢失了关键细节（如”还要优化复杂度””最后要删除临时文件”），模型就会发生任务目标漂移。
+
+**机制设计**：在 `SessionState` 中新增 `user_intents: list[str]` 字段，存储每个用户消息中需要保留的意图摘要。由 `build_runtime_restore_messages` 在 auto_compact 后作为 `user_intent_restore` 类型注入。
+
+```python
+# SessionState 新增
+user_intents: list[str] = field(default_factory=list)
+```
+
+**意图提取时机**：每次用户消息进入系统时，将用户原始消息文本追加到 `user_intents`。不做 LLM 摘要，保留原文。
+
+**注入规则**：
+- 每次 `build_runtime_restore_messages` 被调用时，将 `user_intents` 渲染为 `user_intent_restore` 类型的 meta_runtime_restore 消息
+- 如果 `user_intents` 总长度超过 2000 字符，只保留最近 5 条
+- 注入位置在 summary 之后、kept messages 之前
+- 即使 todo 为空、skill 为空、read_file_state 为空，这条消息也会存在，确保模型在 compact 后仍能看到用户的核心需求
+
+```python
+# runtime restore 新增的 user_intent_restore 块
+if state.user_intents:
+    intent_lines = state.user_intents[-5:]
+    restored.append({
+        “role”: “meta_runtime_restore”,
+        “kind”: “user_intent_restore”,
+        “content”: “用户原始需求（请严格遵守）：\n” + “\n”.join(f”- {intent}” for intent in intent_lines),
+    })
+```
+
+**为什么不依赖 summary 中的 “Primary Request and Intent” 栏目**：summary 由 LLM 生成，质量不可控。在 token 压力大时，LLM 可能将”基于 csv 文件的完整数据生成分析报告”压缩为”用户要求分析数据”，丢失”完整数据””HTML 格式””保存到 ~/Downloads/a.html”等关键约束。显式保留原文是零成本高收益的保底。
+
 #### Auto-compact（摘要压缩）
 
 **触发条件**：水位 >= AUTOCOMPACT_THRESHOLD
 
 **做什么**：和现有逻辑一致，但作为 Governor 的一个策略被调用：
 1. 调 LLM 生成 9 段式结构化摘要（Primary Request / Technical Concepts / Files & Code / Errors / Problem Solving / User Messages / Pending Tasks / Current Work / Optional Next Step）
-2. 用摘要替换旧消息，保留最近 4 条
-3. 注入 runtime restore 消息（todo state、active skills、最近读过的文件）
+2. 用摘要替换旧消息，保留最近 N 条（`keep_last_messages` 见下方说明）
+3. 注入 runtime restore 消息（user_intent_restore、todo state、active skills、最近读过的文件）
 4. 带熔断器：3 次连续失败后停止，60s 冷却期
 
-对于 `read_file`，Auto-compact 不要求保留所有历史读取全文，而是保留“最近 working set 可继续工作”的最小闭环：
+**`keep_last_messages` 取值依据**：
+
+auto_compact 保留的尾部长度必须至少覆盖一轮完整的 tool-use cycle（assistant tool_calls → tool results → assistant response），这样模型才能看到”上一个动作做了什么、结果是什么”。
+
+最小值为 6（2 轮 tool cycle = assistant + tool + assistant + tool + assistant + tool），推荐值为 8（留出 1 轮余量给 assistant 的纯文本回复）。低于 6 会导致模型在 compact 后只看到当前工具调用的输入，看不到上一步的输出，无法形成连续的推理链。
+
+```python
+AUTO_COMPACT_KEEP_LAST_MESSAGES = 8   # 正常路径
+BLOCKING_GATE_KEEP_LAST_MESSAGES = 4  # 紧急路径（更激进但至少保留 1 轮完整 cycle）
+```
+
+对于 `read_file`，Auto-compact 不要求保留所有历史读取全文，而是保留”最近 working set 可继续工作”的最小闭环：
 - 最近访问的少量文件
 - 每个文件受单文件 token 上限约束
 - 已在 preserved tail 中的读取结果不重复注入
@@ -597,13 +651,16 @@ class ContextGovernor:
 
         # 计算 stable overhead
         stable_system_tokens = max(1, len(stable_system) // 4)
-        stable_tools_tokens = _estimate_tools_tokens(stable_tools)
+        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
         required_runtime_tokens = sum(b.token_estimate for b in runtime_blocks if b.required)
-        self._stable_overhead_tokens = stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+        stable_overhead = stable_system_tokens + stable_tools_tokens + required_runtime_tokens
 
-        # 计算水位
-        water_level = self._calc_water_level(session_state)
-        effective_window = self._context_window_tokens - self._max_output_tokens
+        # 计算水位（必须在 assess 内部计算 stable_overhead，不能缓存为实例变量）
+        water_level = self._calc_water_level(session_state, stable_overhead)
+        waterlines = calc_waterlines(
+            context_window_tokens=self._context_window_tokens,
+            max_output_tokens=self._max_output_tokens,
+        )
 
         # 每次都跑：runtime blocks 裁剪
         kept_runtime_blocks = _prune_optional_runtime_blocks(
@@ -626,26 +683,23 @@ class ContextGovernor:
         }
 
         # 轻量策略按流水线叠加执行，不互斥
-        if water_level >= effective_window - PREVIEW_STRIP_BUFFER:
+        if water_level >= waterlines["preview_strip"]:
             observability["strategies_run"].append("preview_strip")
             messages = self._run_preview_strip(messages, observability)
-
-        # read_file working set 受保护，不参与常规 preview/offload 清理
-        messages = self._protect_read_working_set(messages, session_state)
 
         messages = self._run_microcompact(messages, session_state, observability)
         if observability.get("microcompact_effective"):
             observability["strategies_run"].append("microcompact")
 
-        # 重新估算，决定是否还需要重策略
-        water_level = self._recalc_water_level(messages)
-        if water_level >= effective_window - AUTOCOMPACT_BUFFER:
+        # 重新估算，决定是否还需要重策略（关键：轻策略执行后必须重算水位）
+        water_level = self._recalc_water_level(messages, stable_overhead)
+        if water_level >= waterlines["auto_compact"]:
             observability["strategies_run"].append("auto_compact")
             messages = self._run_auto_compact(messages, session_state, store, observability)
 
         # 发送前 blocking gate
-        water_level = self._recalc_water_level(messages)
-        if water_level >= effective_window - BLOCKING_BUFFER:
+        water_level = self._recalc_water_level(messages, stable_overhead)
+        if water_level >= waterlines["blocking"]:
             observability["strategies_run"].append("blocking_gate")
             messages = self._run_blocking_recover(messages, session_state, store, observability)
 
@@ -700,6 +754,15 @@ class SessionState:
     # 现有字段 ...
     session_id: str = field(default_factory=lambda: uuid4().hex[:16])  # 新增
     content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)  # 新增
+    user_intents: list[str] = field(default_factory=list)  # 新增：用户原始意图保留
+```
+
+**`user_intents` 写入时机**：在 `QueryLoop.run()` 中，当用户消息进入 `store` 之前，将用户原始消息文本追加到 `session_state.user_intents`：
+
+```python
+# core/query/loop.py — 用户消息处理处
+if user_message_content:
+    session_state.user_intents.append(user_message_content)
 ```
 
 `SessionStore` 新增：
@@ -820,12 +883,12 @@ class QueryLoop:
 
 | 文件 | 变化 | 原因 |
 |---|---|---|
-| `core/session/compact_service.py` | 删除 `apply_tool_result_budget` 和 `apply_time_based_microcompact`，只保留 `summarize_and_compact` 和 `build_runtime_restore_messages`，并补 `read_file` working set 恢复 | 函数迁入新模块 |
+| `core/session/compact_service.py` | 删除 `apply_tool_result_budget` 和 `apply_time_based_microcompact`，只保留 `summarize_and_compact` 和 `build_runtime_restore_messages`，补 `read_file` working set 恢复和 `user_intent_restore` | 函数迁入新模块 |
 | `core/session/token_budget.py` | `should_trigger_summary_compact` 替换为水位线计算函数 `calc_water_level` | 水位线体系替代单一阈值 |
-| `core/session/state.py` | 新增 `session_id: str` 和 `content_replacement_state: ContentReplacementState` 字段 | Session 基础设施 |
+| `core/session/state.py` | 新增 `session_id: str`、`content_replacement_state: ContentReplacementState`、`user_intents: list[str]` 字段 | Session 基础设施 |
 | `core/session/store.py` | 新增 `tool_result_dir: Path` 属性，`bootstrap()` 时创建 `.harness/sessions/<session_id>/tool-results/` 目录 | offload 目录管理 |
 | `core/session/__init__.py` | 导出更新：移除 ContextManager，新增 ContextGovernor、ToolResultOffloader 等 | 新模块导出 |
-| `core/query/loop.py` | `context_manager` 参数改为 `governor`，新增 `offloader` 参数和调用点 | 接口变更 |
+| `core/query/loop.py` | `context_manager` 参数改为 `governor`，新增 `offloader` 参数和调用点，新增 `user_intents` 追加逻辑 | 接口变更 |
 | `core/session/engine.py` | `context_manager` 改为 `governor`，注入 `offloader` | 接口变更 |
 | `core/session/view_builder.py` | 模块说明和接口文案从 ContextManager 改为 ContextGovernor / PreparedQueryContext | 适配新数据流命名 |
 | `tests/test_query_display.py` | `FakeContextManager` → `FakeGovernor` | 适配新接口 |

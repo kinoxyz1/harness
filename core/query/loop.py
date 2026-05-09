@@ -206,6 +206,7 @@ class QueryLoop:
         recovery,
         governor,
         offloader,
+        user_message_content: str | None = None,
         tools=None,
         renderer=None,
     ) -> QueryResult:
@@ -230,6 +231,10 @@ class QueryLoop:
             QueryResult 包含最终输出、停止原因、使用的轮次等。
         """
         state = RunState()
+
+        # Store user original intent before entering the loop
+        if user_message_content:
+            session_state.user_intents.append(user_message_content)
 
         while True:
             for update in collect_runtime_maintenance_updates(session_state):
@@ -271,15 +276,25 @@ class QueryLoop:
                 overlay_blocks=overlay_blocks,
             )
             if renderer and prepared.observability.get("steps") != ["estimate"]:
-                renderer.show_status(
-                    "上下文管理: "
-                    + ",".join(
-                        step
-                        for step in prepared.observability.get("steps", [])
-                        if step != "estimate"
-                    )
-                    + f" {prepared.observability.get('before_tokens', 0)}->{prepared.observability.get('after_tokens', 0)}"
-                )
+                obs = prepared.observability
+                before = obs.get("before_tokens", 0)
+                after = obs.get("after_tokens", 0)
+                saved = before - after
+                water_line = obs.get("water_line", "")
+                strategies = [
+                    step for step in obs.get("steps", [])
+                    if step not in ("estimate", "per_message_budget")
+                ]
+                parts = []
+                if water_line:
+                    parts.append(f"[{water_line}]")
+                if strategies:
+                    parts.append("+".join(strategies))
+                if saved > 0:
+                    parts.append(f"{before//1000}k→{after//1000}k (↓{saved//1000}k)")
+                else:
+                    parts.append(f"{before//1000}k→{after//1000}k")
+                renderer.show_status("上下文管理: " + " ".join(parts))
 
             view = view_builder.build(
                 prepared,
@@ -314,6 +329,13 @@ class QueryLoop:
 
             state.last_model_response = model_resp
             store.append(model_resp.to_message())
+
+            # ── 分支 0：输出被截断（finish=max_tokens）且无工具调用 → 继续循环 ──
+            # 模型的回复被 max_tokens 截断，说明还有内容要输出。
+            # 注入一条 user 消息让模型继续，而不是返回不完整的文本。
+            if getattr(model_resp, "is_truncated", False) and not model_resp.tool_calls:
+                store.append({"role": "user", "content": "你的回复被截断了，请继续完成。"})
+                continue
 
             # ── 分支 A：已达上限但模型仍想调工具 → 强制终止 ─────────
             if model_resp.tool_calls and state.stop_reason == "max_turns":

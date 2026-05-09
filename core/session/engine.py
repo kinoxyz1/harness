@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from core.prompt.assembler import PromptAssembler
+from core.shared.config import (
+    BASH_RESULT_PERSIST_THRESHOLD,
+    CONTEXT_WINDOW_TOKENS,
+    TOOL_RESULT_PERSIST_THRESHOLD,
+    TOOL_RESULT_PREVIEW_BYTES,
+    TOOL_RESULTS_AGGREGATE_BUDGET,
+)
 from core.query.loop import QueryLoop
 from core.session.commands import execute_skills_command
 from core.session.governor import ContextGovernor
@@ -72,6 +79,10 @@ class SessionEngine:
         self._offloader = ToolResultOffloader(
             tool_result_dir=self._store.tool_result_dir,
             replacement_state=self._state.content_replacement_state,
+            default_persist_threshold=TOOL_RESULT_PERSIST_THRESHOLD,
+            bash_persist_threshold=BASH_RESULT_PERSIST_THRESHOLD,
+            aggregate_budget=TOOL_RESULTS_AGGREGATE_BUDGET,
+            preview_size=TOOL_RESULT_PREVIEW_BYTES,
         )
         self._skill_registry = skill_registry or SkillRegistry()
         self._prompt_assembler = PromptAssembler(skill_registry=self._skill_registry)
@@ -81,6 +92,7 @@ class SessionEngine:
             offloader=self._offloader,
             compact_service=compact_service,
             summary_gateway=model_gateway,
+            context_window_tokens=CONTEXT_WINDOW_TOKENS,
         )
         self._model_gateway = model_gateway
         self._tool_runtime = tool_runtime
@@ -169,6 +181,7 @@ class SessionEngine:
             recovery=self._recovery,
             governor=self._governor,
             offloader=self._offloader,
+            user_message_content=text,
             tools=self._tools,
             renderer=self._renderer,
         )

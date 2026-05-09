@@ -6,17 +6,27 @@ from .content_replacement import ContentReplacementState
 
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
-DEFAULT_MAX_RESULT_SIZE_CHARS = 50_000
-MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000
-PREVIEW_SIZE_BYTES = 2_000
 STRUCTURED_TOOLS = {"todo", "skill"}
 WORKING_CONTEXT_TOOLS = {"read_file"}
 
 
 class ToolResultOffloader:
-    def __init__(self, *, tool_result_dir: Path, replacement_state: ContentReplacementState) -> None:
+    def __init__(
+        self,
+        *,
+        tool_result_dir: Path,
+        replacement_state: ContentReplacementState,
+        default_persist_threshold: int = 8_000,
+        bash_persist_threshold: int = 3_000,
+        aggregate_budget: int = 50_000,
+        preview_size: int = 1_500,
+    ) -> None:
         self._tool_result_dir = tool_result_dir
         self._state = replacement_state
+        self._default_persist_threshold = default_persist_threshold
+        self._bash_persist_threshold = bash_persist_threshold
+        self._aggregate_budget = aggregate_budget
+        self._preview_size = preview_size
 
     def maybe_persist(self, tool_use_id: str, content: str, *, tool_name: str) -> str:
         threshold = self._get_persistence_threshold(tool_name)
@@ -26,10 +36,11 @@ class ToolResultOffloader:
         filepath = self._tool_result_dir / f"{safe_id}.txt"
         filepath.write_text(content, encoding="utf-8")
         preview = self._truncate_preview(content)
+        preview_len = len(preview)
         replacement = (
             f"{PERSISTED_OUTPUT_TAG}\n"
             f"Output too large ({len(content)} chars). Full output saved to: {filepath}\n\n"
-            f"Preview (first {len(preview)} bytes):\n"
+            f"Preview (first {preview_len} bytes):\n"
             f"{preview}\n"
             f"{PERSISTED_OUTPUT_CLOSING_TAG}"
         )
@@ -59,7 +70,7 @@ class ToolResultOffloader:
                 candidates.append((idx, tool_use_id, tool_name))
             rewritten.append(message_copy)
 
-        if total_chars <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS:
+        if total_chars <= self._aggregate_budget:
             return rewritten
 
         for idx, tool_use_id, tool_name in sorted(
@@ -67,7 +78,7 @@ class ToolResultOffloader:
             key=lambda item: len(str(rewritten[item[0]].get("content", ""))),
             reverse=True,
         ):
-            if total_chars <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS:
+            if total_chars <= self._aggregate_budget:
                 break
             content = str(rewritten[idx]["content"])
             replacement = self._state.replacements.get(tool_use_id) or self.maybe_persist(
@@ -84,13 +95,13 @@ class ToolResultOffloader:
         if tool_name in WORKING_CONTEXT_TOOLS | STRUCTURED_TOOLS:
             return 10**18
         if tool_name == "bash":
-            return 30_000
-        return DEFAULT_MAX_RESULT_SIZE_CHARS
+            return self._bash_persist_threshold
+        return self._default_persist_threshold
 
     def _truncate_preview(self, content: str) -> str:
-        preview = content[:PREVIEW_SIZE_BYTES]
+        preview = content[:self._preview_size]
         last_newline = preview.rfind("\n")
-        if last_newline > PREVIEW_SIZE_BYTES * 0.5:
+        if last_newline > self._preview_size * 0.5:
             preview = preview[:last_newline]
         return preview
 

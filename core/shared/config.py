@@ -50,3 +50,22 @@ MAX_TURNS: int = int(os.environ.get("AGENT_MAX_TURNS", "300"))
 
 # 工具输出截断阈值（字符数），防止超大输出撑爆上下文
 MAX_OUTPUT_CHARS: int = int(os.environ.get("MAX_OUTPUT_CHARS", "100000"))
+
+# 上下文窗口大小（token 数），决定水位线阈值。不同模型上下文窗口不同：
+# Claude Sonnet/Opus: 200000, Kimi K2.5: 131072, GLM: 128000
+# 必须与实际模型匹配，否则上下文管理阈值会错位
+CONTEXT_WINDOW_TOKENS: int = int(os.environ.get("CONTEXT_WINDOW_TOKENS", "2000000"))
+
+# ─── 工具结果 Offloader 配置 ─────────────────────────────────────────────────
+
+# 工具结果超过此字符数时落盘到 .harness/sessions/<id>/tool-results/
+TOOL_RESULT_PERSIST_THRESHOLD: int = int(os.environ.get("TOOL_RESULT_PERSIST_THRESHOLD", "2000"))
+
+# bash 工具结果的独立落盘阈值（通常输出较短，需要更低的阈值）
+BASH_RESULT_PERSIST_THRESHOLD: int = int(os.environ.get("BASH_RESULT_PERSIST_THRESHOLD", "1000"))
+
+# 所有工具结果聚合字符数上限，超过时从最大的开始强制落盘
+TOOL_RESULTS_AGGREGATE_BUDGET: int = int(os.environ.get("TOOL_RESULTS_AGGREGATE_BUDGET", "30000"))
+
+# 落盘后保留在上下文中的预览字节数
+TOOL_RESULT_PREVIEW_BYTES: int = int(os.environ.get("TOOL_RESULT_PREVIEW_BYTES", "10000"))

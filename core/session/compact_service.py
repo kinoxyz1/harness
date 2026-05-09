@@ -80,6 +80,16 @@ def apply_time_based_microcompact(
 def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     restored: list[dict[str, Any]] = []
 
+    # 1. User intent restore (highest priority — always present if user_intents non-empty)
+    if state.user_intents:
+        intent_lines = state.user_intents[-5:]
+        restored.append({
+            "role": "meta_runtime_restore",
+            "kind": "user_intent_restore",
+            "content": "用户原始需求（请严格遵守）：\n" + "\n".join(f"- {intent}" for intent in intent_lines),
+        })
+
+    # 2. Todo state restore
     if state.todo_state.items:
         todo_lines = [f"- [{item.status}] {item.active_form}" for item in state.todo_state.items]
         restored.append({
@@ -123,9 +133,13 @@ def summarize_and_compact(
     base_messages = _strip_trailing_runtime_restore(messages)
     keep_from_index = max(0, len(base_messages) - keep_last_messages)
     keep_from_index = _align_keep_start_to_complete_tool_batch(base_messages, keep_from_index)
+
+    # If there's nothing to summarize (all messages would be kept), return as-is
+    if keep_from_index == 0:
+        return list(messages)
     request_options = ModelRequestOptions(
         query_source="compact",
-        max_output_tokens=1200,
+        max_output_tokens=2500,
         thinking_mode="disabled",
     )
     try:
