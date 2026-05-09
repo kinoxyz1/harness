@@ -49,3 +49,34 @@ def test_enforce_per_message_budget_reapplies_frozen_replacements_and_skips_read
     assert rewritten[2]["content"] == "r" * 120000
     assert "<persisted-output>" in rewritten[3]["content"]
     assert "toolu_new" in state.seen_ids
+
+
+def test_maybe_persist_skips_small_results_and_protected_tools(tmp_path: Path) -> None:
+    state = ContentReplacementState()
+    offloader = ToolResultOffloader(tool_result_dir=tmp_path, replacement_state=state)
+
+    result = offloader.maybe_persist("toolu_small", "short", tool_name="web_fetch")
+    assert result == "short"
+    assert not (tmp_path / "toolu_small.txt").exists()
+
+    big_read = offloader.maybe_persist("toolu_read", "x" * 100_000, tool_name="read_file")
+    assert big_read == "x" * 100_000
+    assert not (tmp_path / "toolu_read.txt").exists()
+
+
+def test_truncate_preview_respects_newline_boundaries(tmp_path: Path) -> None:
+    state = ContentReplacementState()
+    offloader = ToolResultOffloader(tool_result_dir=tmp_path, replacement_state=state)
+
+    content_with_late_newline = "a" * 1500 + "\n" + "b" * 500 + "\n" + "c" * 50000
+    replacement = offloader.maybe_persist("toolu_nl", content_with_late_newline, tool_name="web_fetch")
+    assert "<persisted-output>" in replacement
+    preview_section = replacement.split("Preview (first ")[1]
+    byte_count_and_preview = preview_section.split(" bytes):\n", 1)
+    assert len(byte_count_and_preview) == 2
+    preview_text = byte_count_and_preview[1].split("</persisted-output>")[0].strip()
+    assert len(preview_text) <= 2000
+
+    short_content = "short\ncontent"
+    result = offloader.maybe_persist("toolu_short", short_content, tool_name="bash")
+    assert result == "short\ncontent"

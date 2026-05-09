@@ -22,7 +22,8 @@ class ToolResultOffloader:
         threshold = self._get_persistence_threshold(tool_name)
         if len(content) <= threshold:
             return content
-        filepath = self._tool_result_dir / f"{tool_use_id}.txt"
+        safe_id = tool_use_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+        filepath = self._tool_result_dir / f"{safe_id}.txt"
         filepath.write_text(content, encoding="utf-8")
         preview = self._truncate_preview(content)
         replacement = (
@@ -83,7 +84,7 @@ class ToolResultOffloader:
         if tool_name in WORKING_CONTEXT_TOOLS | STRUCTURED_TOOLS:
             return 10**18
         if tool_name == "bash":
-            return min(30_000, DEFAULT_MAX_RESULT_SIZE_CHARS)
+            return 30_000
         return DEFAULT_MAX_RESULT_SIZE_CHARS
 
     def _truncate_preview(self, content: str) -> str:
