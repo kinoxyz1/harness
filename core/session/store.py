@@ -17,6 +17,7 @@ replace_working_transcript() 原位替换 working transcript，
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from .state import SessionState
@@ -25,8 +26,21 @@ from .state import SessionState
 class SessionStore:
     """conversation_messages 的写入门面。"""
 
-    def __init__(self, state: SessionState):
+    def __init__(self, state: SessionState, *, working_dir: str | Path = "."):
         self._state = state
+        self._working_dir = Path(working_dir)
+        self._tool_result_dir = (
+            self._working_dir
+            / ".harness"
+            / "sessions"
+            / state.session_id
+            / "tool-results"
+        )
+        self._tool_result_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def tool_result_dir(self) -> Path:
+        return self._tool_result_dir
 
     def _stamp(self, message: dict[str, Any]) -> dict[str, Any]:
         meta = dict(message.get("_meta", {}))

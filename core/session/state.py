@@ -16,9 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from core.skills import SkillEvent, SkillMeta
 from core.skills.models import InvokedSkillRecord
+
+from .content_replacement import ContentReplacementState
 
 
 @dataclass(slots=True)
@@ -86,6 +89,7 @@ class SessionState:
         用于 stable prompt 的缓存 key —— revision 不变就不用重新渲染。
     """
     conversation_messages: list[dict[str, Any]]
+    session_id: str = field(default_factory=lambda: uuid4().hex[:16])
     prompt_cache: dict[str, str] = field(default_factory=dict)
     discovered_tools: set[str] = field(default_factory=set)
     skill_catalog: dict[str, SkillMeta] = field(default_factory=dict)
@@ -98,3 +102,4 @@ class SessionState:
     usage_totals: dict[str, int] = field(default_factory=dict)
     todo_state: TodoState = field(default_factory=TodoState)
     compact_state: dict[str, Any] = field(default_factory=_default_compact_state)
+    content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)
