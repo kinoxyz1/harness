@@ -46,7 +46,7 @@ class ContextGovernor:
             context_window_tokens=self._context_window_tokens,
             max_output_tokens=self._max_output_tokens,
         )
-        water_level = self._calc_water_level(session_state, stable_system, stable_tools, runtime_blocks)
+        water_level, budget = self._calc_water_level(session_state, stable_system, stable_tools, runtime_blocks)
         messages = self._offloader.enforce_per_message_budget(messages)
         strategies_run: list[str] = []
         if water_level >= waterlines["preview_strip"]:
@@ -93,9 +93,25 @@ class ContextGovernor:
             runtime_blocks=all_blocks,
             working_transcript=messages,
             observability=observability,
+            budget=budget,
         )
 
-    def _calc_water_level(self, session_state, stable_system: str, stable_tools, runtime_blocks) -> int:
+    def _calc_water_level(self, session_state, stable_system: str, stable_tools, runtime_blocks) -> tuple[int, dict[str, int]]:
+        estimated = estimate_messages_tokens(session_state.conversation_messages)
+        used = calibrated_input_tokens(
+            estimated_tokens=estimated,
+            observed_prompt_tokens=session_state.compact_state["last_prompt_tokens"],
+        )
+        stable_system_tokens = max(1, len(stable_system) // 4)
+        stable_tools_tokens = 0 if not stable_tools else max(1, len(str(stable_tools)) // 4)
+        required_runtime_tokens = sum(block.token_estimate for block in runtime_blocks if block.required)
+        water_level = used + stable_system_tokens + stable_tools_tokens + required_runtime_tokens
+        budget = {
+            "stable_system_tokens": stable_system_tokens,
+            "stable_tools_tokens": stable_tools_tokens,
+            "required_runtime_tokens": required_runtime_tokens,
+        }
+        return water_level, budget
         estimated = estimate_messages_tokens(session_state.conversation_messages)
         used = calibrated_input_tokens(
             estimated_tokens=estimated,
@@ -107,12 +123,36 @@ class ContextGovernor:
         return used + stable_system_tokens + stable_tools_tokens + required_runtime_tokens
 
     def _summarize_with_breaker(self, *, messages, session_state, keep_last_messages):
-        return self._compact_service.summarize_and_compact(
-            messages,
-            state=session_state,
-            summary_gateway=self._summary_gateway,
-            keep_last_messages=keep_last_messages,
-        )
+        if self._summary_breaker_open(session_state):
+            return messages
+        try:
+            compacted = self._compact_service.summarize_and_compact(
+                messages,
+                state=session_state,
+                summary_gateway=self._summary_gateway,
+                keep_last_messages=keep_last_messages,
+            )
+        except Exception:
+            self._mark_summary_failure(session_state)
+            return messages
+        self._mark_summary_success(session_state)
+        return compacted
+
+    def _summary_breaker_open(self, session_state) -> bool:
+        if session_state.compact_state["consecutive_summary_failures"] < 3:
+            return False
+        return self._time_fn() < session_state.compact_state["summary_compact_cooldown_until"]
+
+    def _mark_summary_failure(self, session_state) -> None:
+        session_state.compact_state["consecutive_summary_failures"] += 1
+        if session_state.compact_state["consecutive_summary_failures"] >= 3:
+            session_state.compact_state["summary_compact_cooldown_until"] = (
+                self._time_fn() + self._summary_breaker_cooldown_seconds
+            )
+
+    def _mark_summary_success(self, session_state) -> None:
+        session_state.compact_state["consecutive_summary_failures"] = 0
+        session_state.compact_state["summary_compact_cooldown_until"] = 0.0
 
     def _run_blocking_recover(self, *, messages, session_state, store):
         compacted = self._compact_service.summarize_and_compact(

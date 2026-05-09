@@ -185,7 +185,7 @@ def test_skill_invocation_records_the_current_query_turn(tmp_path: Path) -> None
     assert engine.state.invoked_skills["analysis-report"].invoked_at_turn == 1
 
 
-def test_session_engine_default_query_loop_path_wires_context_manager(tmp_path: Path) -> None:
+def test_session_engine_default_query_loop_path_wires_governor(tmp_path: Path) -> None:
     write_analysis_report_fixture(tmp_path)
     engine = make_engine_with_stubbed_model(
         tmp_path,
