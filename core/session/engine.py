@@ -18,7 +18,8 @@ from typing import Any
 from core.prompt.assembler import PromptAssembler
 from core.query.loop import QueryLoop
 from core.session.commands import execute_skills_command
-from core.session.context_manager import ContextManager
+from core.session.governor import ContextGovernor
+from core.session.offloader import ToolResultOffloader
 from core.session.state import SessionState
 from core.session.store import SessionStore
 from core.session.view_builder import MessageViewBuilder
@@ -46,7 +47,7 @@ class SessionEngine:
         recovery,
         query_loop=None,
         view_builder=None,
-        context_manager=None,
+        governor=None,
         skill_registry=None,
         tools=None,
         renderer=None,
@@ -60,18 +61,24 @@ class SessionEngine:
             recovery: 恢复管理器，处理空响应。
             query_loop: 查询循环实例，默认创建 QueryLoop()。
             view_builder: 消息视图构建器，默认创建 MessageViewBuilder(tools)。
-            context_manager: 查询前上下文管理器，默认创建 ContextManager(...)。
+            governor: 上下文治理器，默认创建 ContextGovernor(...)。
             skill_registry: Skill 注册器，默认创建 SkillRegistry()。
             tools: 可用工具 schema 列表，传给 MessageViewBuilder。
             renderer: UI 渲染器，可选。
         """
         self._state = SessionState(conversation_messages=[])
-        self._store = SessionStore(self._state)
+        working_dir = Path(getattr(tool_context, "working_dir", "."))
+        self._store = SessionStore(self._state, working_dir=working_dir)
+        self._offloader = ToolResultOffloader(
+            tool_result_dir=self._store.tool_result_dir,
+            replacement_state=self._state.content_replacement_state,
+        )
         self._skill_registry = skill_registry or SkillRegistry()
         self._prompt_assembler = PromptAssembler(skill_registry=self._skill_registry)
         self._view_builder = view_builder or MessageViewBuilder(tools=tools)
         self._query_loop = query_loop or QueryLoop()
-        self._context_manager = context_manager or ContextManager(
+        self._governor = governor or ContextGovernor(
+            offloader=self._offloader,
             compact_service=compact_service,
             summary_gateway=model_gateway,
         )
@@ -160,7 +167,8 @@ class SessionEngine:
             tool_context=self._tool_context,
             policy_runner=self._policy_runner,
             recovery=self._recovery,
-            context_manager=self._context_manager,
+            governor=self._governor,
+            offloader=self._offloader,
             tools=self._tools,
             renderer=self._renderer,
         )

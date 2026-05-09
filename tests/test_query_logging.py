@@ -39,16 +39,17 @@ class FakeViewBuilder:
         return ModelInputView(system="SYSTEM", messages=list(prepared.working_transcript), tools=None)
 
 
-class FakeContextManager:
+class FakeGovernor:
     def __init__(self, prepared_messages=None, observability=None) -> None:
         self.prepared_messages = prepared_messages
         self.observability = observability or {
             "steps": ["estimate"],
             "before_tokens": 0,
             "after_tokens": 0,
+            "strategies_run": [],
         }
 
-    def prepare_for_query(self, *, session_state, run_state, store, query_source, **kwargs):
+    def assess(self, *, session_state, run_state, store, **kwargs):
         run_state.context_observability = dict(self.observability)
         messages = self.prepared_messages
         if messages is None:
@@ -58,6 +59,11 @@ class FakeContextManager:
             working_transcript=messages,
             observability=run_state.context_observability,
         )
+
+
+class FakeOffloader:
+    def maybe_persist(self, tool_use_id, content, *, tool_name):
+        return content
 
 
 class FakeModelGateway:
@@ -146,7 +152,8 @@ def test_query_loop_renders_reasoning_when_present() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -170,7 +177,8 @@ def test_query_loop_renders_reasoning_with_todo_planning_policy() -> None:
         tool_context=object(),
         policy_runner=PolicyRunner([TodoPlanningPolicy()]),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -193,7 +201,8 @@ def test_query_loop_renders_assistant_content_when_tool_calls_are_present() -> N
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -215,7 +224,8 @@ def test_query_loop_marks_next_turn_after_tool_batch() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
     )
 
     assert result.stop_reason == StopReason.COMPLETED
@@ -224,15 +234,16 @@ def test_query_loop_marks_next_turn_after_tool_batch() -> None:
     assert session_state.conversation_messages[-2]["content"] == "ok"
 
 
-def test_query_loop_uses_context_manager_before_view_builder_and_surfaces_status() -> None:
+def test_query_loop_uses_governor_before_view_builder_and_surfaces_status() -> None:
     session_state = SessionState(conversation_messages=[{"role": "user", "content": "raw"}])
     store = SessionStore(session_state)
     builder = FakeViewBuilder()
     renderer = FakeRenderer()
     observability = {
-        "steps": ["estimate", "tool_result_budget", "microcompact"],
+        "steps": ["estimate", "per_message_budget", "microcompact"],
         "before_tokens": 1200,
         "after_tokens": 800,
+        "strategies_run": ["microcompact"],
     }
 
     result = QueryLoop().run(
@@ -245,13 +256,14 @@ def test_query_loop_uses_context_manager_before_view_builder_and_surfaces_status
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(
+        governor=FakeGovernor(
             prepared_messages=[{"role": "user", "content": "prepared"}],
             observability=observability,
         ),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
     assert result.stop_reason == StopReason.COMPLETED
     assert builder.last_messages == [{"role": "user", "content": "prepared"}]
-    assert renderer.status_calls == ["上下文管理: tool_result_budget,microcompact 1200->800"]
+    assert renderer.status_calls == ["上下文管理: per_message_budget,microcompact 1200->800"]

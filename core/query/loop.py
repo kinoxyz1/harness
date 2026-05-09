@@ -204,7 +204,8 @@ class QueryLoop:
         tool_context,
         policy_runner,
         recovery,
-        context_manager,
+        governor,
+        offloader,
         tools=None,
         renderer=None,
     ) -> QueryResult:
@@ -220,7 +221,8 @@ class QueryLoop:
             tool_context: 工具上下文，提供工作目录、文件状态等。
             policy_runner: 策略运行器，注入前置/后置消息，控制循环终止。
             recovery: 恢复管理器，处理空响应等异常情况。
-            context_manager: 上下文管理器，预算治理并产出 PreparedQueryContext。
+            governor: 上下文治理器，水位线评估并产出 PreparedQueryContext。
+            offloader: 工具结果 offloader，大工具结果持久化到磁盘。
             tools: 可用工具 schema 列表。
             renderer: UI 渲染器，展示思考过程、assistant 回复、工具状态等。
 
@@ -241,21 +243,24 @@ class QueryLoop:
             # ── 步骤 2：构建模型输入 ──────────────────────────────────
             working_dir = getattr(tool_context, "working_dir", None) or "."
 
+            # 组织不变的系统提示词+skill meta info
             stable_system = prompt_assembler.build_stable_context(
                 session_state,
                 project_root=working_dir if tool_context is not None else None,
             )
+            # 组织不变的系统工具提示
             stable_tools = prompt_assembler.build_stable_tools(
                 session_state,
                 tools=tools,
             )
+            # 运行时环境信息
             runtime_blocks = prompt_assembler.build_runtime_blocks(
                 session_state,
                 working_dir=working_dir,
             )
             overlay_blocks = prompt_assembler.build_query_overlay_blocks(session_state, state)
 
-            prepared = context_manager.prepare_for_query(
+            prepared = governor.assess(
                 session_state=session_state,
                 run_state=state,
                 store=store,
@@ -288,7 +293,7 @@ class QueryLoop:
             except ContextWindowExceededError:
                 if state.reactive_recovery_attempted:
                     raise
-                context_manager.reactive_recover(
+                governor.reactive_recover(
                     session_state=session_state,
                     run_state=state,
                     store=store,
@@ -344,7 +349,20 @@ class QueryLoop:
                     apply_session_update=lambda update: apply_session_update(session_state, update),
                     apply_run_update=apply_run_update,
                 )
-                store.extend(batch.messages)
+                tool_name_by_id = {call.call_id: call.name for call in parsed_calls}
+                persisted_messages = []
+                for message in batch.messages:
+                    rewritten = dict(message)
+                    if rewritten.get("role") == "tool" and rewritten.get("tool_call_id"):
+                        tool_name = tool_name_by_id.get(rewritten["tool_call_id"], "")
+                        if tool_name != "read_file":
+                            rewritten["content"] = offloader.maybe_persist(
+                                rewritten["tool_call_id"],
+                                str(rewritten.get("content", "")),
+                                tool_name=tool_name,
+                            )
+                    persisted_messages.append(rewritten)
+                store.extend(persisted_messages)
                 state.turn_count += 1
                 state.tool_calls_executed += len(parsed_calls)
                 apply_transition(state, TransitionReason.NEXT_TURN)

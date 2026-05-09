@@ -125,6 +125,47 @@ class ContextGovernor:
             store.replace_working_transcript(compacted)
         return compacted
 
+    def reactive_recover(
+        self,
+        *,
+        session_state,
+        run_state,
+        store,
+        stable_system: str = "",
+        stable_tools: list[dict[str, Any]] | None = None,
+        runtime_blocks: list[ContextBlock] | None = None,
+        overlay_blocks: list[ContextBlock] | None = None,
+    ) -> PreparedQueryContext:
+        messages = list(session_state.conversation_messages)
+        messages = self._offloader.enforce_per_message_budget(messages)
+        messages = apply_time_based_microcompact(
+            messages,
+            age_cutoff_seconds=0,
+            keep_recent_trajectories=0,
+        )
+        messages = self._run_blocking_recover(
+            messages=messages,
+            session_state=session_state,
+            store=store,
+        )
+        observability = {
+            "water_level": 0,
+            "water_line": "reactive_recovery",
+            "strategies_run": ["reactive_recovery"],
+            "steps": ["reactive_recovery"],
+            "before_tokens": 0,
+            "after_tokens": estimate_messages_tokens(messages),
+        }
+        session_state.compact_state["last_compact_observability"] = observability
+        run_state.context_observability = observability
+        return PreparedQueryContext(
+            stable_system=stable_system,
+            stable_tools=stable_tools,
+            runtime_blocks=list(runtime_blocks or []) + list(overlay_blocks or []),
+            working_transcript=messages,
+            observability=observability,
+        )
+
     def _water_line_name(self, water_level: int, waterlines: dict[str, int]) -> str:
         if water_level >= waterlines["blocking"]:
             return "blocking"

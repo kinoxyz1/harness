@@ -120,9 +120,9 @@ class FakePromptAssembler:
         return []
 
 
-class FakeContextManager:
-    def prepare_for_query(self, *, session_state, run_state, store, query_source, **kwargs):
-        observability = {"steps": ["estimate"], "before_tokens": 0, "after_tokens": 0}
+class FakeGovernor:
+    def assess(self, *, session_state, run_state, store, **kwargs):
+        observability = {"steps": ["estimate"], "before_tokens": 0, "after_tokens": 0, "strategies_run": []}
         run_state.context_observability = observability
         msgs = list(session_state.conversation_messages)
         return SimpleNamespace(
@@ -130,6 +130,11 @@ class FakeContextManager:
             working_transcript=msgs,
             observability=observability,
         )
+
+
+class FakeOffloader:
+    def maybe_persist(self, tool_use_id, content, *, tool_name):
+        return content
 
 
 def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
@@ -158,7 +163,8 @@ def test_query_loop_shows_assistant_update_for_tool_turn() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -197,7 +203,8 @@ def test_query_loop_shows_ui_only_fallback_for_empty_tool_turn() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -243,7 +250,8 @@ def test_query_loop_composes_fallback_for_three_tools() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -281,7 +289,8 @@ def test_query_loop_composes_fallback_across_skill_and_following_tools() -> None
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -317,7 +326,8 @@ def test_query_loop_composes_fallback_for_single_tool() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -391,7 +401,8 @@ def test_query_loop_renders_full_todo_plan_once_then_current_focus() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -455,7 +466,8 @@ def test_query_loop_renders_completion_summary_when_todo_plan_clears() -> None:
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 
@@ -551,7 +563,8 @@ def test_query_loop_renders_full_plan_again_after_clear_without_completion_snaps
         tool_context=object(),
         policy_runner=FakePolicyRunner(),
         recovery=FakeRecovery(),
-        context_manager=FakeContextManager(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
         renderer=renderer,
     )
 

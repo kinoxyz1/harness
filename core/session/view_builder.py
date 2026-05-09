@@ -2,8 +2,8 @@
 
 你在数据流中的位置：
     QueryLoop.run()
-      → ContextManager.prepare_for_query()     预算治理、compact、产出 PreparedQueryContext
-      → view_builder.build()                    ← 你在这里
+      → ContextGovernor.assess()          预算治理、blocking gate、产出 PreparedQueryContext
+      → view_builder.build()              ← 你在这里
         → 拼接 stable_system + runtime_blocks    组装最终 system prompt
         → _strip_old_thinking()                  清理旧的 reasoning_signature
         → 过滤 stable_tools                      根据 allowed_tools_override 限制工具
@@ -11,7 +11,7 @@
       → model_gateway.call_once(view)            发送给 API
 
 核心设计：view_builder 不再决定上下文取舍
-    本类只负责接收 ContextManager 产出的 PreparedQueryContext，
+    本类只负责接收 ContextGovernor 产出的 PreparedQueryContext，
     做最轻量的规范化（签名清理、工具过滤）后输出 ModelInputView。
     不再做 transcript slice 选择，不做预算控制。
 """
