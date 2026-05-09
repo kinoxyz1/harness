@@ -4,6 +4,8 @@ from typing import Any
 
 from core.llm.client import ModelRequestOptions
 
+from .microcompact import MICROCOMPACT_PLACEHOLDER
+from .microcompact import apply_time_based_microcompact as _microcompact_apply
 from .read_working_set import collect_recent_read_restore_messages
 from .state import SessionState
 from .token_budget import estimate_message_tokens
@@ -14,8 +16,6 @@ from .transcript_rewriter import (
 )
 
 TOOL_RESULT_PLACEHOLDER = "[Tool result compacted to stay within budget]"
-MICROCOMPACT_PLACEHOLDER = "[Old tool result content cleared]"
-COMPACTABLE_TOOLS = {"read_file", "find", "grep", "glob"}
 SUMMARY_SYSTEM_PROMPT = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
 Write the summary using exactly these 9 sections:
@@ -70,56 +70,11 @@ def apply_time_based_microcompact(
     age_cutoff_seconds: float,
     keep_recent_trajectories: int,
 ) -> list[dict[str, Any]]:
-    timestamps = [
-        created_at
-        for message in messages
-        if (created_at := _message_created_at(message)) is not None
-    ]
-    newest_timestamp = max(timestamps, default=None)
-    if newest_timestamp is None:
-        return [dict(message) for message in messages]
-
-    compactable_tool_ids: list[str] = []
-    compactable_tool_id_set: set[str] = set()
-    for message in messages:
-        if message.get("role") != "assistant":
-            continue
-        for tool_call in message.get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            tool_call_id = tool_call.get("id")
-            tool_name = tool_call.get("name")
-            if not tool_call_id or tool_name not in COMPACTABLE_TOOLS:
-                continue
-            compactable_tool_ids.append(tool_call_id)
-            compactable_tool_id_set.add(tool_call_id)
-
-    if not compactable_tool_id_set:
-        return [dict(message) for message in messages]
-
-    keep_ids = set(compactable_tool_ids[-keep_recent_trajectories:]) if keep_recent_trajectories > 0 else set()
-    compacted: list[dict[str, Any]] = []
-    for message in messages:
-        if message.get("role") != "tool":
-            compacted.append(dict(message))
-            continue
-
-        tool_call_id = message.get("tool_call_id")
-        created_at = _message_created_at(message)
-        if (
-            tool_call_id in compactable_tool_id_set
-            and tool_call_id not in keep_ids
-            and created_at is not None
-            and newest_timestamp - created_at >= age_cutoff_seconds
-        ):
-            rewritten = dict(message)
-            rewritten["content"] = MICROCOMPACT_PLACEHOLDER
-            compacted.append(rewritten)
-            continue
-
-        compacted.append(dict(message))
-
-    return compacted
+    return _microcompact_apply(
+        messages,
+        age_cutoff_seconds=age_cutoff_seconds,
+        keep_recent_trajectories=keep_recent_trajectories,
+    )
 
 
 def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -226,11 +181,3 @@ def _align_keep_start_to_complete_tool_batch(messages: list[dict[str, Any]], kee
             return batch_start - 1
 
     return keep_from_index
-
-
-def _message_created_at(message: dict[str, Any]) -> float | None:
-    meta = message.get("_meta")
-    if not isinstance(meta, dict):
-        return None
-    created_at = meta.get("created_at")
-    return created_at if isinstance(created_at, (int, float)) else None

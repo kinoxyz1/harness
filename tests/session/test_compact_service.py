@@ -75,14 +75,26 @@ def test_apply_time_based_microcompact_compacts_only_old_compactable_results() -
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"id": "toolu_old", "name": "read_file", "args": {"path": "old.txt"}}],
+            "tool_calls": [{"id": "toolu_read", "name": "read_file", "args": {"path": "old.txt"}}],
             "_meta": {"created_at": 100.0},
         },
         {
             "role": "tool",
-            "tool_call_id": "toolu_old",
-            "content": "old content",
+            "tool_call_id": "toolu_read",
+            "content": "read content",
             "_meta": {"created_at": 110.0},
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "toolu_bash", "name": "bash", "args": {"command": "ls"}}],
+            "_meta": {"created_at": 120.0},
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "toolu_bash",
+            "content": "old bash output",
+            "_meta": {"created_at": 130.0},
         },
         {
             "role": "assistant",
@@ -96,18 +108,6 @@ def test_apply_time_based_microcompact_compacts_only_old_compactable_results() -
             "content": "recent content",
             "_meta": {"created_at": 190.0},
         },
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "toolu_bash", "name": "bash", "args": {"command": "pwd"}}],
-            "_meta": {"created_at": 195.0},
-        },
-        {
-            "role": "tool",
-            "tool_call_id": "toolu_bash",
-            "content": "bash output",
-            "_meta": {"created_at": 200.0},
-        },
     ]
 
     compacted = apply_time_based_microcompact(
@@ -116,9 +116,12 @@ def test_apply_time_based_microcompact_compacts_only_old_compactable_results() -
         keep_recent_trajectories=1,
     )
 
-    assert compacted[1]["content"] == MICROCOMPACT_PLACEHOLDER
-    assert compacted[3]["content"] == "recent content"
-    assert compacted[5]["content"] == "bash output"
+    # read_file is NOT compactable (protected working context)
+    assert compacted[1]["content"] == "read content"
+    # bash IS compactable and old enough (200 - 130 = 70 >= 50) and not in keep_recent
+    assert compacted[3]["content"] == MICROCOMPACT_PLACEHOLDER
+    # find is compactable but recent and in keep_recent_trajectories
+    assert compacted[5]["content"] == "recent content"
 
 
 def test_apply_time_based_microcompact_ignores_unstamped_messages_when_finding_newest() -> None:
@@ -126,7 +129,7 @@ def test_apply_time_based_microcompact_ignores_unstamped_messages_when_finding_n
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"id": "toolu_old", "name": "read_file", "args": {"path": "old.txt"}}],
+            "tool_calls": [{"id": "toolu_old", "name": "bash", "args": {"command": "ls"}}],
         },
         {
             "role": "tool",
@@ -154,6 +157,7 @@ def test_apply_time_based_microcompact_ignores_unstamped_messages_when_finding_n
         keep_recent_trajectories=1,
     )
 
+    # bash is compactable and old enough (200 - 100 = 100 >= 50), but not in keep_recent
     assert compacted[1]["content"] == MICROCOMPACT_PLACEHOLDER
     assert compacted[3]["content"] == "recent content"
 
