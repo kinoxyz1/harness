@@ -29,6 +29,8 @@ _FRAMEWORK_PROMPT = """\
 每个 todo 项必须具体可操作：包含做什么、对什么对象、预期产出什么，不要写笼统的阶段描述。
 复杂多步骤任务优先使用 task_plan 生成 TaskState，再开始执行。
 TaskState 激活时不要再把 todo 当权威状态；todo 只是从任务投影出的用户视图。
+LOCAL 任务直接用普通工具（bash/edit_file等）执行，不要用 task_execute；完成后调用 task_plan 更新状态。
+fresh_subagent 任务用 task_execute 执行。
 如果 skill 刚展开，而任务明显进入多步骤工作流，在继续深入执行之前先考虑 task_plan。
 优先使用工具而非文字描述。
 

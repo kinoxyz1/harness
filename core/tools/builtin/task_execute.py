@@ -9,7 +9,12 @@ from ..context import SessionUpdate, SessionUpdateKind, ToolInvocationOutcome, T
 
 SCHEMA: dict[str, Any] = {
     "name": "task_execute",
-    "description": "Execute a planned TaskState task by task_id. Use this only after task_plan has created TaskState.",
+    "description": (
+        "Execute a planned TaskState task by task_id via a fresh subagent. "
+        "ONLY use this for tasks with execution_mode='fresh_subagent'. "
+        "For execution_mode='local' tasks, execute them inline with normal tools (bash, edit_file, etc.) "
+        "and then call task_plan to update the task status."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
@@ -48,7 +53,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.FAILURE,
             error="local_task",
-            messages=[make_tool_message(context, "This task is marked local. Execute it in the main thread with normal tools.")],
+            messages=[make_tool_message(context, "LOCAL tasks are executed inline with normal tools (bash, edit_file, etc.), not via task_execute. Use task_plan to update status after completion.")],
         )
     if task.execution_mode != TaskExecutionMode.FRESH_SUBAGENT:
         return ToolInvocationOutcome(

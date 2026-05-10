@@ -14,7 +14,9 @@ SCHEMA: dict[str, Any] = {
         "requires research + implementation + verification, needs subagent dispatch, "
         "or spans multiple files/modules. Submit the full replacement task list each time; "
         "this tool does not do incremental patching. When TaskState is active, do not use todo "
-        "as the source of truth."
+        "as the source of truth. "
+        "After completing a task with normal tools, call this again with updated status "
+        "(e.g., completed/in_progress) to track progress."
     ),
     "input_schema": {
         "type": "object",
