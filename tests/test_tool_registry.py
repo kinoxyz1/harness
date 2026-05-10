@@ -17,7 +17,7 @@ class TestSchemaShape:
 
     def test_expected_tools_registered(self):
         names = {schema["name"] for schema in registry.schemas()}
-        expected = {"bash", "edit_file", "find", "read_file", "skill", "task_plan", "todo", "write_file"}
+        expected = {"bash", "edit_file", "find", "read_file", "skill", "task_execute", "task_plan", "todo", "write_file"}
         assert names == expected
 
     def test_input_schema_has_type_object(self):

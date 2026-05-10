@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import os
 from typing import Any, Callable
@@ -16,6 +16,8 @@ from .engine import SessionEngine
 from .view_builder import MessageViewBuilder
 from ..tools import ToolUseContext, registry
 from ..tools.runtime import ToolExecutorRuntime
+from ..tasks.models import TaskPacket
+from ..skills.runtime import build_invoked_skill_record
 
 
 class SubagentType(str, Enum):
@@ -52,10 +54,11 @@ class SubagentDefinition:
 
 @dataclass
 class SubagentRequest:
-    task: str
+    task_packet: TaskPacket
     agent_type: SubagentType = SubagentType.GENERAL
     description: str | None = None
     max_turns: int | None = None
+    preloaded_skill_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +166,38 @@ def render_subagent_summary(result: SubagentRunResult) -> str:
     return "\n".join(lines)
 
 
+def _render_fresh_packet(packet: TaskPacket) -> str:
+    sections = [
+        f"Task: {packet.title}",
+        "",
+        "Directive:",
+        packet.directive,
+    ]
+    if packet.known_facts:
+        sections.extend(["", "Known facts:"] + [f"- {item}" for item in packet.known_facts])
+    if packet.out_of_scope:
+        sections.extend(["", "Out of scope:"] + [f"- {item}" for item in packet.out_of_scope])
+    if packet.expected_output:
+        sections.extend(["", "Expected output:"] + [f"- {item}" for item in packet.expected_output])
+    if packet.done_criteria:
+        sections.extend(["", "Done criteria:"] + [f"- {item}" for item in packet.done_criteria])
+    return "\n".join(sections)
+
+
+def _preload_required_skills(engine, parent_context, skill_ids, turn):
+    if parent_context is None or parent_context.skill_registry is None:
+        return
+    for skill_id in skill_ids:
+        content = parent_context.skill_registry.load(skill_id)
+        record = build_invoked_skill_record(
+            state=engine.state,
+            skill_id=skill_id,
+            content=content,
+            turn=turn,
+        )
+        engine.state.invoked_skills[skill_id] = record
+
+
 class SubagentRuntime:
     """负责运行隔离上下文中的子代理。"""
 
@@ -215,8 +250,12 @@ class SubagentRuntime:
         # Set system prompt override so PromptAssembler includes it in stable context
         engine.state.system_prompt_override = system_prompt
 
+        # Preload required skills into the fresh engine
+        _preload_required_skills(engine, self._parent_context, request.preloaded_skill_ids, turn=0)
+
         # 执行任务
-        result = engine.submit_user_message(request.task)
+        prompt_text = _render_fresh_packet(request.task_packet)
+        result = engine.submit_user_message(prompt_text)
 
         return SubagentRunResult(
             request=request,

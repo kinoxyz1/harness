@@ -81,6 +81,9 @@ def _tool_fallback_fragment(call: ToolCall) -> str | None:
         return f"搜索: {pattern}" if pattern else "搜索文件"
     if name == "task_plan":
         return "更新任务计划"
+    if name == "task_execute":
+        task_id = args.get("task_id", "")
+        return f"执行任务 {task_id}" if task_id else "执行任务"
     return None
 
 
