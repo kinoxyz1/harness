@@ -80,7 +80,9 @@ def _render_task_state(task_state: TaskState) -> str:
     current = task_state.current_task_id or ""
     lines = [f'<task-state current_task_id="{current}">']
     for task_id in task_state.ordered_task_ids:
-        task = task_state.tasks_by_id[task_id]
+        task = task_state.tasks_by_id.get(task_id)
+        if task is None:
+            continue
         label = task.active_form or task.subject
         lines.append(
             f'  <task id="{task.task_id}" status="{task.status}" mode="{task.execution_mode}">{label}</task>'
