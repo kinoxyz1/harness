@@ -265,7 +265,7 @@ def main() -> None:
         policy_runner=PolicyRunner([
             MaxTurnsPolicy(MAX_TURNS),
             TodoPlanningPolicy(),
-            SkillRelevancePolicy(),
+            SkillRelevancePolicy(model_gateway=model_gateway),
             SkillUsageNudgePolicy(),
         ]),
         recovery=RecoveryManager(),
