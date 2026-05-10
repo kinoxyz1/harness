@@ -56,6 +56,13 @@ MAX_OUTPUT_CHARS: int = int(os.environ.get("MAX_OUTPUT_CHARS", "100000"))
 # 必须与实际模型匹配，否则上下文管理阈值会错位
 CONTEXT_WINDOW_TOKENS: int = int(os.environ.get("CONTEXT_WINDOW_TOKENS", "2000000"))
 
+# ─── Skill 匹配配置 ────────────────────────────────────────────────────────
+
+# 是否使用 LLM 进行 skill 相关性匹配（增加一次轻量 API 调用，提升匹配准确率）
+# false（默认）: 使用关键词精确子串匹配
+# true: 使用 LLM 分类调用，支持语义匹配
+SKILL_LLM_MATCH: bool = os.environ.get("SKILL_LLM_MATCH", "false").lower() in ("true", "1", "yes")
+
 # ─── 终端渲染配置 ───────────────────────────────────────────────────────────
 
 # Markdown 代码块使用的 Rich/Pygments 主题，控制 fenced code block 的配色与背景
