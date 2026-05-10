@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from core.tasks.models import TaskExecutionMode, TaskState, TaskStatus
@@ -67,12 +68,14 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
     )
     normalized = normalize_subagent_result(task.task_id, sub_result)
 
-    next_task = task
-    next_task.packet_revision = packet.packet_revision
-    next_task.status = normalized.status
-    next_task.result_summary = normalized.summary
-    next_task.files_modified = list(normalized.files_modified)
-    next_task.failure_reason = normalized.failure_reason
+    next_task = replace(
+        task,
+        packet_revision=packet.packet_revision,
+        status=normalized.status,
+        result_summary=normalized.summary,
+        files_modified=list(normalized.files_modified),
+        failure_reason=normalized.failure_reason,
+    )
 
     next_state = TaskState(
         tasks_by_id={**state.task_state.tasks_by_id, task.task_id: next_task},
