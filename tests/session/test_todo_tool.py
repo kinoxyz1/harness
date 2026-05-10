@@ -153,3 +153,41 @@ def test_todo_schema_description_mentions_workflow_and_verification() -> None:
     assert "verification" in description.lower()
     assert "exactly one" in description.lower()
     assert "post-skill replanning after a skill was just expanded" not in description.lower()
+
+
+def test_todo_rejects_writes_when_task_state_is_active(tmp_path) -> None:
+    from core.query.reducers import apply_session_update
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+    from core.tools.builtin.todo import handle
+
+    state = SessionState(conversation_messages=[])
+    state.task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Inspect runtime",
+                goal="Inspect runtime deeply",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.LOCAL,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+    )
+    context = _make_context(tmp_path, state)
+
+    result = handle(
+        {
+            "items": [
+                {
+                    "content": "Legacy todo write",
+                    "active_form": "Legacy todo write",
+                    "status": "in_progress",
+                }
+            ]
+        },
+        context,
+    )
+
+    assert result.status.value == "failure"
+    assert result.error == "task_state_active"

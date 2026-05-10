@@ -472,3 +472,34 @@ def test_apply_session_update_sets_task_state_and_projects_todo() -> None:
     assert session.task_state.current_task_id == "task-1"
     assert session.todo_state.items[0].content == "Inspect runtime"
     assert session.todo_state.last_write_turn == 5
+
+
+class _BashTool:
+    SCHEMA = {"name": "bash", "description": "bash", "input_schema": {"type": "object", "properties": {}, "required": []}}
+    READONLY = False
+    ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": True, "concurrency_safe": False}
+
+    @staticmethod
+    def handle(args, context):
+        raise AssertionError("bash should have been rejected by pre-plan gate")
+
+
+def test_runtime_rejects_non_preplan_tools_when_gate_is_active(tmp_path) -> None:
+    reg = ToolRegistry()
+    reg.register(_BarrierTool)
+    reg.register(_TodoTool)
+    reg.register(_BashTool)
+    ctx = ToolUseContext(working_dir=str(tmp_path), max_turns=20)
+    runtime = ToolExecutorRuntime(reg, ctx)
+    run_state = RunState(task_planning_required=True, allowed_tools_override={"task_plan", "skill", "find", "read_file"})
+    session_state = SessionState(conversation_messages=[])
+
+    batch = runtime.execute_batch(
+        [ToolCall(idx=0, name="bash", call_id="toolu_bash", args={})],
+        run_state=run_state,
+        apply_session_update=lambda update: apply_session_update(session_state, update),
+        apply_run_update=apply_run_update,
+    )
+
+    assert batch.tool_statuses == [ToolOutcomeStatus.BLOCKED]
+    assert "Task planning required before execution" in batch.messages[0]["content"]

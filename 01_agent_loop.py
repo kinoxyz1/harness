@@ -41,6 +41,7 @@ from core.llm.anthropic_client import AnthropicClient
 from core.policy.base import PolicyRunner
 from core.policy.max_turns import MaxTurnsPolicy
 from core.policy.todo_tracking import TodoPlanningPolicy
+from core.policy.task_planning import TaskPlanningPolicy
 from core.policy.skill_relevance import SkillRelevancePolicy
 from core.policy.skill_usage_nudge import SkillUsageNudgePolicy
 from core.query.recovery import RecoveryManager
@@ -265,6 +266,7 @@ def main() -> None:
         tool_runtime=ToolExecutorRuntime(registry, tool_context, renderer=renderer),
         tool_context=tool_context,
         policy_runner=PolicyRunner([
+            TaskPlanningPolicy(),
             MaxTurnsPolicy(MAX_TURNS),
             TodoPlanningPolicy(),
             SkillRelevancePolicy(model_gateway=model_gateway),

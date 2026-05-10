@@ -278,14 +278,19 @@ class ToolExecutorRuntime:
         allowed_tools: set[str],
     ) -> ToolInvocationOutcome:
         allowed_str = ", ".join(sorted(allowed_tools))
+        message = (
+            "Task planning required before execution. Call `task_plan` first."
+            if "task_plan" in allowed_tools
+            else f"Tool '{call.name}' rejected: not allowed by runtime policy. allowed_tools=[{allowed_str}]"
+        )
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.BLOCKED,
-            error="rejected_tool",
+            error="runtime_policy_block",
             messages=[
                 {
                     "role": "tool",
                     "tool_call_id": call.call_id,
-                    "content": f"Tool '{call.name}' rejected: not allowed by runtime policy. allowed_tools=[{allowed_str}]",
+                    "content": message,
                 }
             ],
         )

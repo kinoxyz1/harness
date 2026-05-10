@@ -154,6 +154,18 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
             messages=[make_tool_message(context, "No session state available")],
         )
 
+    if getattr(state, "task_state", None) is not None and state.task_state.tasks_by_id:
+        return ToolInvocationOutcome(
+            status=ToolOutcomeStatus.FAILURE,
+            error="task_state_active",
+            messages=[
+                make_tool_message(
+                    context,
+                    "TaskState is active. Update tasks via `task_plan` / task runtime, not `todo`.",
+                )
+            ],
+        )
+
     if not isinstance(args, dict):
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.FAILURE,
