@@ -1,5 +1,4 @@
 from core.query.reducers import apply_session_update
-from core.query.state import RunState
 from core.session.state import SessionState
 from core.tools.context import SessionUpdateKind, ToolUseContext
 

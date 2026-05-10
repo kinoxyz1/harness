@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.tasks.planner_runtime import build_task_state
-from ..context import SessionUpdate, SessionUpdateKind, ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext, make_tool_message
+from ..context import RunUpdate, RunUpdateKind, SessionUpdate, SessionUpdateKind, ToolInvocationOutcome, ToolOutcomeStatus, ToolUseContext, make_tool_message
 
 
 SCHEMA: dict[str, Any] = {
@@ -78,6 +78,9 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
                 kind=SessionUpdateKind.SET_TASK_STATE,
                 payload={"task_state": next_state},
             )
+        ],
+        run_updates=[
+            RunUpdate(kind=RunUpdateKind.RESET_TODO_TURN_COUNTER),
         ],
         messages=[make_tool_message(context, f"TaskState rewritten with {len(next_state.ordered_task_ids)} tasks.")],
     )
