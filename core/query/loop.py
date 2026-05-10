@@ -79,6 +79,8 @@ def _tool_fallback_fragment(call: ToolCall) -> str | None:
     if name == "find":
         pattern = args.get("pattern", "")
         return f"搜索: {pattern}" if pattern else "搜索文件"
+    if name == "task_plan":
+        return "更新任务计划"
     return None
 
 
@@ -120,8 +122,11 @@ def _clone_todo_items(items: list[TodoItem]) -> list[TodoItem]:
 
 
 def _todo_write_succeeded(batch: ToolBatchResult) -> bool:
-    """检查工具批次中是否有 todo 写入成功。"""
-    return any(update.kind == SessionUpdateKind.SET_TODO_ITEMS for update in batch.session_updates)
+    """检查工具批次中是否有 todo 或 task_state 写入成功。"""
+    return any(
+        update.kind in {SessionUpdateKind.SET_TODO_ITEMS, SessionUpdateKind.SET_TASK_STATE}
+        for update in batch.session_updates
+    )
 
 
 def _render_todo_state_update(renderer, session_state, state: RunState, batch: ToolBatchResult) -> None:

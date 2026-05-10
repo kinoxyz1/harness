@@ -205,3 +205,33 @@ def test_runtime_view_survives_after_transcript_rewrite_with_stable_tools(
     assert [tool["name"] for tool in view.tools] == ["todo"]
     assert "Rewrite-safe skill instructions" in view.system
     assert view.messages[-1]["content"] == "follow-up"
+
+
+def test_runtime_view_survives_when_task_state_replaces_todo_state(tmp_path: Path) -> None:
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+
+    state = SessionState(
+        conversation_messages=[{"role": "user", "content": "Inspect the runtime"}],
+    )
+    state.task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Inspect runtime",
+                goal="Inspect runtime deeply",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.LOCAL,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+    )
+
+    builder = MessageViewBuilder()
+    assembler = PromptAssembler()
+    prepared = _build_prepared(state, assembler, tmp_path)
+    view = builder.build(prepared, run_state=RunState())
+
+    assert "<task-state" in view.system
+    assert "Inspect runtime" in view.system
+    assert "<todo-state>" not in view.system

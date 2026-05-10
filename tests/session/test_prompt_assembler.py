@@ -881,3 +881,42 @@ def test_build_internal_runtime_view_exposes_read_file_state(tmp_path: Path) -> 
     assert str(tmp_path / "a.txt") in internal["read_file_state"]
     assert internal["todo_items"] == ["Drafting"]
     assert internal["transition"] == "max_tokens_recovery"
+
+
+# ── task_state rendering ────────────────────────────────────
+
+
+def test_build_stable_switches_from_todo_guidance_to_task_plan_guidance(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+    assembler = PromptAssembler()
+
+    stable = assembler.build_stable(state, project_root=str(tmp_path))
+
+    assert "复杂多步骤任务优先使用 task_plan" in stable
+    assert "TaskState 激活时不要再把 todo 当权威状态" in stable
+
+
+def test_build_runtime_context_prefers_task_state_over_todo_state(tmp_path: Path) -> None:
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+
+    state = make_state(tmp_path)
+    state.todo_state.items = [TodoItem(content="Legacy todo", active_form="Legacy todo", status="in_progress")]
+    state.task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Inspect runtime",
+                goal="Inspect runtime deeply",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.LOCAL,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+    )
+
+    result = PromptAssembler().build_runtime_context(state, working_dir=str(tmp_path))
+
+    assert "<task-state" in result
+    assert "Inspect runtime" in result
+    assert "<todo-state>" not in result

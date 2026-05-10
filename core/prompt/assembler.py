@@ -10,6 +10,7 @@ from core.prompt.system_context import get_system_context, get_user_context
 from core.query.state import RunState
 from core.session.query_context import ContextBlock
 from core.session.state import SessionState, TodoItem
+from core.tasks.models import TaskState
 
 if TYPE_CHECKING:
     from core.skills.registry import SkillRegistry
@@ -65,6 +66,26 @@ def _render_todo_state(items: list[TodoItem]) -> str:
         lines.append(f"    {item.active_form}")
         lines.append("  </item>")
     lines.append("</todo-state>")
+    return "\n".join(lines)
+
+
+def _render_task_state(task_state: TaskState) -> str:
+    """将 TaskState 渲染为 <task-state> XML。
+
+    当 TaskState 激活（有任务）时，优先于 <todo-state> 渲染，
+    让模型看到权威的任务计划而非投影出的 todo 视图。
+    """
+    if not task_state.tasks_by_id:
+        return ""
+    current = task_state.current_task_id or ""
+    lines = [f'<task-state current_task_id="{current}">']
+    for task_id in task_state.ordered_task_ids:
+        task = task_state.tasks_by_id[task_id]
+        label = task.active_form or task.subject
+        lines.append(
+            f'  <task id="{task.task_id}" status="{task.status}" mode="{task.execution_mode}">{label}</task>'
+        )
+    lines.append("</task-state>")
     return "\n".join(lines)
 
 
@@ -182,7 +203,7 @@ class PromptAssembler:
         内容组成（按优先级排列）：
         1. 环境信息（工作目录、日期、平台）
         2. 激活的 skill 指令（<active-skills>）
-        3. Todo 状态（<todo-state>）
+        3. Task 状态（<task-state>）或 Todo 状态（<todo-state>）
         4. 已读文件摘要（<file-runtime>，最多 12K 字符）
 
         整体截断到 char_budget（默认 36K 字符）。
@@ -195,9 +216,14 @@ class PromptAssembler:
         active_msgs = self.build_active_skill_messages(state)
         if active_msgs:
             parts.append(active_msgs[0]["content"])
-        todo_xml = _render_todo_state(state.todo_state.items)
-        if todo_xml:
-            parts.append(todo_xml)
+        # 优先使用 task_state；仅在 task_state 为空时回退到 todo_state
+        task_xml = _render_task_state(state.task_state)
+        if task_xml:
+            parts.append(task_xml)
+        else:
+            todo_xml = _render_todo_state(state.todo_state.items)
+            if todo_xml:
+                parts.append(todo_xml)
         file_block = _render_file_runtime(state.read_file_state, char_budget=12_000)
         if file_block:
             parts.append(file_block)
@@ -222,6 +248,8 @@ class PromptAssembler:
         return {
             "invoked_skills": list(state.invoked_skills.keys()),
             "todo_items": [item.active_form for item in state.todo_state.items],
+            "task_ids": list(state.task_state.ordered_task_ids),
+            "current_task_id": state.task_state.current_task_id,
             "read_file_state": dict(state.read_file_state),
             "transition": run_state.transition.value if run_state.transition is not None else None,
         }
@@ -271,15 +299,27 @@ class PromptAssembler:
             )
         )
 
-        todo_content = _render_todo_state(state.todo_state.items)
-        blocks.append(
-            ContextBlock(
-                kind="todo_state",
-                content=todo_content,
-                required=True,
-                token_estimate=_estimate_block_tokens(todo_content),
+        # 优先使用 task_state；仅在 task_state 为空时回退到 todo_state
+        task_content = _render_task_state(state.task_state)
+        if task_content:
+            blocks.append(
+                ContextBlock(
+                    kind="task_state",
+                    content=task_content,
+                    required=True,
+                    token_estimate=_estimate_block_tokens(task_content),
+                )
             )
-        )
+        else:
+            todo_content = _render_todo_state(state.todo_state.items)
+            blocks.append(
+                ContextBlock(
+                    kind="todo_state",
+                    content=todo_content,
+                    required=True,
+                    token_estimate=_estimate_block_tokens(todo_content),
+                )
+            )
 
         file_block = _render_file_runtime(state.read_file_state, char_budget=12_000)
         if file_block:
