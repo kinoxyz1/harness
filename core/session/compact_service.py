@@ -120,6 +120,27 @@ def build_runtime_restore_messages(state: SessionState, *, kept_messages: list[d
         )
     )
 
+    # 新增：skill_catalog_restore — 重建完整 skill 可用性感知
+    # 只提醒未激活的 skills（已激活的通过 skills_restore 恢复）
+    if state.skill_catalog:
+        catalog_lines: list[str] = []
+        for skill_id, meta in sorted(state.skill_catalog.items()):
+            if skill_id not in state.invoked_skills:
+                line = f"- {skill_id}: {meta.description}"
+                if meta.when_to_use:
+                    line += f"（适用：{meta.when_to_use}）"
+                catalog_lines.append(line)
+        if catalog_lines:
+            restored.append({
+                "role": "meta_runtime_restore",
+                "kind": "skill_catalog_restore",
+                "content": (
+                    "以下 skill 可用但尚未激活。如果当前任务匹配，"
+                    "建议先调用 skill 工具：\n"
+                    + "\n".join(catalog_lines)
+                ),
+            })
+
     return restored
 
 

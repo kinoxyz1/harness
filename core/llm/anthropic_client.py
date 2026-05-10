@@ -23,6 +23,26 @@ from ..shared.run_options import RunDisplayOptions
 _console = Console()
 
 
+def _sanitize_surrogates(obj: Any) -> Any:
+    """递归清除数据结构中的 UTF-16 代理字符（surrogate）。
+
+    macOS CJK 输入法 + 删除操作可能在 input() 中引入孤立的代理字符，
+    导致 Anthropic SDK 的 JSON 序列化 (.encode('utf-8')) 崩溃。
+    对有效字符串无开销（try 命中直接返回），仅在有代理字符时才做替换。
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return {k: _sanitize_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_surrogates(item) for item in obj]
+    return obj
+
+
 class LLMResponse:
     """对 API response 的结构化封装。
 
@@ -145,6 +165,10 @@ class AnthropicClient:
 
         normalized_system, api_messages = normalize_messages(messages)
         full_system = "\n\n".join(part for part in [system, normalized_system] if part)
+
+        # Defense in depth: 清除所有消息中的代理字符，防止 JSON 序列化崩溃
+        api_messages = _sanitize_surrogates(api_messages)
+        full_system = _sanitize_surrogates(full_system)
 
         params: dict[str, Any] = {
             "model": MODEL,

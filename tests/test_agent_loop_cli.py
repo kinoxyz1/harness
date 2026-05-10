@@ -52,3 +52,41 @@ def test_cli_returns_true_for_empty_input():
     assert result is True
     assert engine.commands == []
     assert engine.messages == []
+
+
+def test_line_buffer_backspace_deletes_one_cjk_character():
+    buffer = agent_loop.LineBuffer()
+
+    buffer.insert("你好")
+    deleted = buffer.backspace()
+
+    assert deleted is True
+    assert buffer.text == "你"
+    assert buffer.cursor == 1
+
+
+def test_line_buffer_backspace_stops_at_prompt_boundary():
+    buffer = agent_loop.LineBuffer()
+
+    deleted = buffer.backspace()
+
+    assert deleted is False
+    assert buffer.text == ""
+    assert buffer.cursor == 0
+
+
+def test_line_buffer_cursor_column_counts_wide_characters():
+    buffer = agent_loop.LineBuffer()
+
+    buffer.insert("你a")
+
+    assert buffer.cursor_column(prompt=">> ") == 6
+
+
+def test_handle_input_drops_surrogate_characters_before_submit():
+    engine = FakeEngine()
+
+    with patch.object(agent_loop.console, "print"):
+        agent_loop.handle_input("你\udce5好", engine)
+
+    assert engine.messages == ["你好"]

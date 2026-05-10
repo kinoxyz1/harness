@@ -104,3 +104,9 @@ class SessionState:
     compact_state: dict[str, Any] = field(default_factory=_default_compact_state)
     content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)
     user_intents: list[str] = field(default_factory=list)
+
+    # ── Behavioral anchoring countermeasure state ──────────────────
+    # 跨 query 持久化（不能放 RunState，因为 RunState 每次 QueryLoop.run() 重建）
+    queries_since_skill_activation: int = 0
+    last_known_skill_keys: set[str] = field(default_factory=set)
+    skill_relevance_cooldown: dict[str, int] = field(default_factory=dict)
