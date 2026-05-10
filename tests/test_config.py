@@ -14,6 +14,8 @@ def _reload_config(monkeypatch):
         "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL",
         "LLM_MAX_TOKENS", "LLM_THINKING_MODE", "LLM_THINKING_BUDGET",
         "LLM_SHOW_THINKING", "BASH_TIMEOUT",
+        "UI_MARKDOWN_CODE_THEME", "UI_MARKDOWN_INLINE_CODE_STYLE",
+        "UI_MARKDOWN_CODE_BLOCK_STYLE",
     ]:
         monkeypatch.delenv(var, raising=False)
     import core.shared.config as cfg
@@ -77,3 +79,22 @@ def test_preserves_existing_env_vars(monkeypatch):
     assert cfg.MAX_TOKENS == 4096
     assert cfg.THINKING_MODE == "enabled"
     assert cfg.BASH_TIMEOUT == 60
+
+
+def test_markdown_render_config_defaults():
+    import core.shared.config as cfg
+    importlib.reload(cfg)
+    assert cfg.UI_MARKDOWN_CODE_THEME == "friendly"
+    assert cfg.UI_MARKDOWN_INLINE_CODE_STYLE == "bold cyan"
+    assert cfg.UI_MARKDOWN_CODE_BLOCK_STYLE == "cyan"
+
+
+def test_markdown_render_config_overrides(monkeypatch):
+    monkeypatch.setenv("UI_MARKDOWN_CODE_THEME", "bw")
+    monkeypatch.setenv("UI_MARKDOWN_INLINE_CODE_STYLE", "bold #ff0000")
+    monkeypatch.setenv("UI_MARKDOWN_CODE_BLOCK_STYLE", "#00ff00")
+    import core.shared.config as cfg
+    importlib.reload(cfg)
+    assert cfg.UI_MARKDOWN_CODE_THEME == "bw"
+    assert cfg.UI_MARKDOWN_INLINE_CODE_STYLE == "bold #ff0000"
+    assert cfg.UI_MARKDOWN_CODE_BLOCK_STYLE == "#00ff00"

@@ -6,11 +6,25 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
+from rich.theme import Theme
 
 from ..shared.interfaces import Renderer
-from ..shared.config import SHOW_THINKING
+from ..shared.config import (
+    SHOW_THINKING,
+    UI_MARKDOWN_CODE_BLOCK_STYLE,
+    UI_MARKDOWN_CODE_THEME,
+    UI_MARKDOWN_INLINE_CODE_STYLE,
+)
+
+
+_MARKDOWN_RENDER_THEME = Theme({
+    "markdown.code": UI_MARKDOWN_INLINE_CODE_STYLE,
+    "markdown.code_block": UI_MARKDOWN_CODE_BLOCK_STYLE,
+})
+_MARKDOWN_CODE_THEME = UI_MARKDOWN_CODE_THEME
 
 
 def _tool_call_label(name: str, args: dict[str, Any]) -> str:
@@ -119,6 +133,19 @@ def _tool_result_summary(name: str, output: str) -> str | None:
     return None
 
 
+def render_markdown(console: Console, content: str | None) -> None:
+    """通过 Rich 渲染 assistant 的 Markdown 文本。"""
+    if content and content.strip():
+        with console.use_theme(_MARKDOWN_RENDER_THEME):
+            console.print(
+                Markdown(
+                    content,
+                    code_theme=_MARKDOWN_CODE_THEME,
+                    inline_code_theme=_MARKDOWN_CODE_THEME,
+                )
+            )
+
+
 class RichRenderer:
     """基于 Rich Console 的终端渲染器。"""
 
@@ -132,8 +159,7 @@ class RichRenderer:
 
     def show_assistant(self, content: str | None) -> None:
         """显示助手文字内容。"""
-        if content and content.strip():
-            print(content)
+        render_markdown(self._console, content)
 
     def show_timing(self, elapsed: float, prompt_tokens: int, completion_tokens: int, finish_reason: str) -> None:
         """显示 LLM 调用计时信息。"""

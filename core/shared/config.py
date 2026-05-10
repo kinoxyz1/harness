@@ -56,6 +56,17 @@ MAX_OUTPUT_CHARS: int = int(os.environ.get("MAX_OUTPUT_CHARS", "100000"))
 # 必须与实际模型匹配，否则上下文管理阈值会错位
 CONTEXT_WINDOW_TOKENS: int = int(os.environ.get("CONTEXT_WINDOW_TOKENS", "2000000"))
 
+# ─── 终端渲染配置 ───────────────────────────────────────────────────────────
+
+# Markdown 代码块使用的 Rich/Pygments 主题，控制 fenced code block 的配色与背景
+UI_MARKDOWN_CODE_THEME: str = os.environ.get("UI_MARKDOWN_CODE_THEME", "friendly")
+
+# 行内代码的终端样式，使用 Rich style 语法
+UI_MARKDOWN_INLINE_CODE_STYLE: str = os.environ.get("UI_MARKDOWN_INLINE_CODE_STYLE", "bold cyan")
+
+# 代码块文本的基础终端样式，使用 Rich style 语法
+UI_MARKDOWN_CODE_BLOCK_STYLE: str = os.environ.get("UI_MARKDOWN_CODE_BLOCK_STYLE", "cyan")
+
 # ─── 工具结果 Offloader 配置 ─────────────────────────────────────────────────
 
 # 工具结果超过此字符数时落盘到 .harness/sessions/<id>/tool-results/

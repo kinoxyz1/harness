@@ -211,6 +211,34 @@ def test_renderer_prefers_active_form_for_in_progress_items() -> None:
     assert "Cross-check findings" not in output
 
 
+def test_renderer_renders_assistant_markdown_through_rich_console() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_assistant("# Title\n\n- item\n\n```python\nprint('hi')\n```")
+
+    output = console.export_text()
+
+    assert "Title" in output
+    assert "item" in output
+    assert "print('hi')" in output
+    assert "# Title" not in output
+    assert "\n- item" not in output
+    assert "```" not in output
+
+
+def test_renderer_uses_light_code_theme_for_markdown_code() -> None:
+    console = Console(record=True, width=120)
+    renderer = RichRenderer(console)
+
+    renderer.show_assistant("`x = 1`\n\n```bash\necho hi\n```")
+
+    html = console.export_html(inline_styles=True)
+
+    assert "background-color: #000000" not in html
+    assert "background-color: #272822" not in html
+
+
 def test_renderer_formats_human_friendly_tool_labels() -> None:
     console = Console(record=True, width=120)
     renderer = RichRenderer(console)

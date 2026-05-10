@@ -88,6 +88,9 @@ harness/
 | `LLM_MAX_TOKENS` | `8192` | 单次输出 token 上限 |
 | `LLM_THINKING_MODE` | `auto` | `auto / enabled / disabled` |
 | `AGENT_MAX_TURNS` | `300` | 单次 query 最大工具轮次 |
+| `UI_MARKDOWN_CODE_THEME` | `friendly` | 终端 Markdown 代码块语法高亮主题 |
+| `UI_MARKDOWN_INLINE_CODE_STYLE` | `bold cyan` | 行内代码的 Rich 样式 |
+| `UI_MARKDOWN_CODE_BLOCK_STYLE` | `cyan` | 代码块文本的基础 Rich 样式 |
 
 其余配置见 `core/shared/config.py`。
 

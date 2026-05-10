@@ -44,7 +44,7 @@ from core.policy.todo_tracking import TodoPlanningPolicy
 from core.policy.skill_relevance import SkillRelevancePolicy
 from core.policy.skill_usage_nudge import SkillUsageNudgePolicy
 from core.query.recovery import RecoveryManager
-from core.ui.renderer import RichRenderer
+from core.ui.renderer import RichRenderer, render_markdown
 from core.session.commands import is_skills_command
 from core.session.engine import SessionEngine
 from core.session.view_builder import MessageViewBuilder
@@ -244,7 +244,7 @@ def handle_input(raw: str, engine: SessionEngine) -> bool:
         return True
     result = engine.submit_user_message(text)
     if result.final_output:
-        console.print(result.final_output)
+        render_markdown(console, result.final_output)
     return True
 
 

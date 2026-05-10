@@ -5,3 +5,4 @@ __pycache__/
 /.claude/
 /.harness/skills/
 /.superpowers/
+.harness
