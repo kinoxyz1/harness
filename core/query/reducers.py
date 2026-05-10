@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 
+from core.tasks.projection import project_task_state_to_todo_items
 from core.tools.context import RunUpdate, RunUpdateKind, SessionUpdate, SessionUpdateKind
 
 
@@ -27,6 +28,13 @@ def apply_session_update(session_state, update: SessionUpdate) -> None:
         session_state.todo_state.items = [] if all_completed else items
         session_state.todo_state.last_completed_items = items if all_completed else []
         session_state.todo_state.last_write_turn = payload.get("last_write_turn")
+        return
+    if update.kind == SessionUpdateKind.SET_TASK_STATE:
+        next_state = payload.get("task_state")
+        if next_state is not None:
+            session_state.task_state = next_state
+            session_state.todo_state.items = project_task_state_to_todo_items(next_state)
+            session_state.todo_state.last_write_turn = next_state.last_planned_turn
         return
     if update.kind == SessionUpdateKind.UPSERT_FILE_STATE:
         path = payload.get("path")

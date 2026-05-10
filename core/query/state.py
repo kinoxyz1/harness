@@ -29,3 +29,7 @@ class RunState:
     assistant_turns_since_todo: int = 0              # 连续未写 todo 的轮次
 
     last_displayed_todo_items: list["TodoItem"] | None = None  # 用于 UI 去重
+
+    task_planning_required: bool = False
+    task_planning_reason: str | None = None
+    task_plan_invoked_this_turn: bool = False

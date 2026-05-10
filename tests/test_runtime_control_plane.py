@@ -433,3 +433,42 @@ def test_apply_run_update_raises_on_unknown_kind() -> None:
         assert "Unsupported run update kind" in str(exc)
     else:
         raise AssertionError("Expected ValueError for unsupported run update kind")
+
+
+def test_run_state_starts_with_task_planning_flags() -> None:
+    state = RunState()
+    assert state.task_planning_required is False
+    assert state.task_planning_reason is None
+    assert state.task_plan_invoked_this_turn is False
+
+
+def test_apply_session_update_sets_task_state_and_projects_todo() -> None:
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+
+    session = SessionState(conversation_messages=[])
+    task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Inspect runtime",
+                goal="Inspect runtime deeply",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.LOCAL,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+        last_planned_turn=5,
+    )
+
+    apply_session_update(
+        session,
+        SessionUpdate(
+            kind=SessionUpdateKind.SET_TASK_STATE,
+            payload={"task_state": task_state},
+        ),
+    )
+
+    assert session.task_state.current_task_id == "task-1"
+    assert session.todo_state.items[0].content == "Inspect runtime"
+    assert session.todo_state.last_write_turn == 5

@@ -23,6 +23,7 @@ from typing import Any
 class SessionUpdateKind(str, Enum):
     INVOKE_SKILL = "invoke_skill"
     SET_TODO_ITEMS = "set_todo_items"
+    SET_TASK_STATE = "set_task_state"
     UPSERT_FILE_STATE = "upsert_file_state"
     INVALIDATE_FILE_STATE = "invalidate_file_state"
     APPEND_SKILL_EVENT = "append_skill_event"

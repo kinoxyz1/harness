@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from core.skills import SkillEvent, SkillMeta
 from core.skills.models import InvokedSkillRecord
+from core.tasks.models import TaskState
 
 from .content_replacement import ContentReplacementState
 
@@ -101,6 +102,7 @@ class SessionState:
     session_metadata: dict[str, Any] = field(default_factory=dict)
     usage_totals: dict[str, int] = field(default_factory=dict)
     todo_state: TodoState = field(default_factory=TodoState)
+    task_state: TaskState = field(default_factory=TaskState)
     compact_state: dict[str, Any] = field(default_factory=_default_compact_state)
     content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)
     user_intents: list[str] = field(default_factory=list)
