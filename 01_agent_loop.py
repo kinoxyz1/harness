@@ -258,8 +258,10 @@ def main() -> None:
 
     # ── 组装 Engine（所有组件的唯一协调者）──────────────────
     # Engine 持有 SessionState，其他组件通过 Engine 间接共享状态
+    model_gateway = ModelGateway(AnthropicClient())
+
     engine = SessionEngine(
-        model_gateway=ModelGateway(AnthropicClient()),
+        model_gateway=model_gateway,
         tool_runtime=ToolExecutorRuntime(registry, tool_context, renderer=renderer),
         tool_context=tool_context,
         policy_runner=PolicyRunner([
