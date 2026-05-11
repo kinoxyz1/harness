@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from core.llm.client import ModelGateway, ModelRequestOptions
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 _CLASSIFICATION_SYSTEM_PROMPT = (
     "你是 skill 匹配器。根据用户意图，从可用 skill 列表中选出匹配的。\n"
+    "只允许依据当前这一条用户请求判断，不要被更早的对话、assistant 解释、架构讨论带偏。\n"
+    "如果用户只是在讨论 skill、agent、workflow、subagent、能力边界，不等于要激活对应 meta-skill。\n"
+    "对于 skill-creator，只有用户明确要求创建、编写、更新 skill 或 SKILL.md 时才允许返回。\n"
+    "不确定时返回 NONE。\n"
     "只返回匹配的 skill ID，逗号分隔。无匹配则返回 NONE。\n"
     "不要解释，不要输出其他内容。"
 )
@@ -45,6 +50,13 @@ class SkillRelevancePolicy:
     RELEVANCE_BUDGET_CHARS = 1500
     COOLDOWN_QUERIES = 3
     CONTEXT_WINDOW_MESSAGES = 6
+    META_SKILL_PATTERNS = {
+        "skill-creator": (
+            re.compile(r"(创建|新建|编写|写好|生成|制作|更新|修改).{0,24}(skill|技能)", re.IGNORECASE),
+            re.compile(r"skill\.md", re.IGNORECASE),
+            re.compile(r"\b(create|build|write|update|edit)\b.{0,24}\bskill\b", re.IGNORECASE),
+        ),
+    }
 
     def __init__(self, model_gateway: ModelGateway | None = None):
         self._model_gateway = model_gateway
@@ -59,8 +71,8 @@ class SkillRelevancePolicy:
         cooldown = session_state.skill_relevance_cooldown
         current_stale = session_state.queries_since_skill_activation
 
-        context_text = self._extract_recent_context(session_state.conversation_messages)
-        if not context_text:
+        current_user_text = self._extract_recent_context(session_state.conversation_messages)
+        if not current_user_text:
             return []
 
         # 收集未冷却、未激活的候选 skill
@@ -77,7 +89,8 @@ class SkillRelevancePolicy:
             return []
 
         # 根据配置选择匹配策略
-        matched_ids = self._match(context_text, candidates)
+        matched_ids = self._match(current_user_text, candidates)
+        matched_ids = self._post_validate_matches(current_user_text, matched_ids)
 
         if not matched_ids:
             return []
@@ -106,8 +119,8 @@ class SkillRelevancePolicy:
 
         content = (
             "<system-reminder type=\"skill_relevance\">\n"
-            "以下 skill 与当前任务高度匹配但尚未激活。\n"
-            "阻塞要求：必须先调用 skill 工具激活匹配的 skill，再继续处理任务。\n\n"
+            "以下 skill 与当前任务高度相关但尚未激活。\n"
+            "可优先考虑调用 skill 工具加载匹配的 skill，再根据展开后的指令决定下一步。\n\n"
             + "\n".join(lines)
             + "\n</system-reminder>"
         )
@@ -157,7 +170,7 @@ class SkillRelevancePolicy:
         skill_summary = self._format_skill_summary(candidates)
         user_prompt = (
             f"可用 skill:\n{skill_summary}\n\n"
-            f"用户最近输入:\n{context_text}"
+            f"当前用户请求:\n{context_text}"
         )
 
         try:
@@ -192,15 +205,28 @@ class SkillRelevancePolicy:
             return []
         return [sid.strip() for sid in text.split(",") if sid.strip() in valid_ids]
 
+    def _post_validate_matches(self, current_user_text: str, matched_ids: list[str]) -> list[str]:
+        """对高风险 meta-skill 做本地显式意图校验。"""
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for skill_id in matched_ids:
+            if skill_id in seen:
+                continue
+            seen.add(skill_id)
+            patterns = self.META_SKILL_PATTERNS.get(skill_id)
+            if patterns and not any(pattern.search(current_user_text) for pattern in patterns):
+                continue
+            filtered.append(skill_id)
+        return filtered
+
     # ── 共用方法 ──────────────────────────────────────────────
 
     def _extract_recent_context(self, messages: list[dict[str, Any]]) -> str:
-        """从最近 N 条消息中提取纯文本作为匹配上下文。"""
-        recent = messages[-self.CONTEXT_WINDOW_MESSAGES:] if messages else []
-        parts: list[str] = []
-        for msg in recent:
-            role = msg.get("role", "")
+        """只提取最后一条 user 消息作为 skill router 输入。"""
+        if not messages:
+            return ""
+        for msg in reversed(messages):
             content = msg.get("content", "")
-            if isinstance(content, str) and role in ("user", "assistant"):
-                parts.append(content)
-        return " ".join(parts).lower()
+            if msg.get("role") == "user" and isinstance(content, str):
+                return content.lower()
+        return ""

@@ -26,10 +26,10 @@ MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
 # ─── Thinking 配置 ─────────────────────────────────────────────────────────
 
 # thinking 模式：auto=自适应（模型自决定思考深度），enabled=固定预算，disabled=关闭
-THINKING_MODE: str = os.environ.get("LLM_THINKING_MODE", "auto")
+THINKING_MODE: str = os.environ.get("LLM_THINKING_MODE", "enabled")
 
 # enabled 模式下的 thinking token 预算上限，auto 模式下由模型自行决定
-THINKING_BUDGET: int = int(os.environ.get("LLM_THINKING_BUDGET", "4096"))
+THINKING_BUDGET: int = int(os.environ.get("LLM_THINKING_BUDGET", "254"))
 
 # 是否在终端显示 thinking 内容（蓝框中的思考过程）
 SHOW_THINKING: bool = os.environ.get("LLM_SHOW_THINKING", "true").lower() in ("true", "1", "yes")
@@ -43,7 +43,7 @@ MAX_REASONING_CHARS: int = int(os.environ.get("LLM_MAX_REASONING_CHARS", "200000
 # ─── 运行时配置 ─────────────────────────────────────────────────────────────
 
 # bash 命令执行超时时间（秒）
-BASH_TIMEOUT: int = int(os.environ.get("BASH_TIMEOUT", "120"))
+BASH_TIMEOUT: int = int(os.environ.get("BASH_TIMEOUT", "30"))
 
 # 单次 query 允许的最大工具调用轮次，防止无限循环
 MAX_TURNS: int = int(os.environ.get("AGENT_MAX_TURNS", "300"))

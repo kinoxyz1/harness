@@ -37,13 +37,13 @@ def test_cli_routes_skills_command_to_handle_command():
 
 def test_cli_routes_normal_input_to_submit():
     engine = FakeEngine()
-    with patch.object(agent_loop.console, "print") as mock_print:
+    with patch.object(agent_loop, "render_markdown") as mock_render:
         result = agent_loop.handle_input("hello world", engine)
 
     assert result is True
     assert engine.commands == []
     assert engine.messages == ["hello world"]
-    mock_print.assert_called_with("reply")
+    mock_render.assert_called_once()
 
 
 def test_cli_returns_true_for_empty_input():
@@ -86,7 +86,7 @@ def test_line_buffer_cursor_column_counts_wide_characters():
 def test_handle_input_drops_surrogate_characters_before_submit():
     engine = FakeEngine()
 
-    with patch.object(agent_loop.console, "print"):
+    with patch.object(agent_loop, "render_markdown"):
         agent_loop.handle_input("你\udce5好", engine)
 
     assert engine.messages == ["你好"]

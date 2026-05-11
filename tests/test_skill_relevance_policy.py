@@ -41,6 +41,9 @@ def test_matching_skill_injects_reminder():
     assert messages[0]["role"] == "user"
     assert "analysis-report" in messages[0]["content"]
     assert "skill_relevance" in messages[0]["content"]
+    assert "阻塞要求" not in messages[0]["content"]
+    assert "必须先调用 skill 工具" not in messages[0]["content"]
+    assert "可优先考虑调用 skill 工具" in messages[0]["content"]
 
 
 def test_already_invoked_skill_is_skipped():
@@ -91,19 +94,20 @@ def test_no_matching_context_returns_empty():
 def test_llm_match_disabled_uses_keywords():
     """SKILL_LLM_MATCH=false (default) → keyword matching, no LLM call."""
     gateway = MagicMock(spec=ModelGateway)
-    policy = SkillRelevancePolicy(model_gateway=gateway)
-    assert policy._use_llm is False
-    # Verify keyword matching still works
-    state = SessionState(conversation_messages=[
-        {"role": "user", "content": "基于csv文件生成分析报告"},
-    ])
-    state.skill_catalog = {
-        "analysis-report": _make_meta("analysis-report", "生成分析报告", "生成分析报告,数据报告,HTML报告"),
-    }
-    messages = policy.before_model_call(state, RunState())
-    assert len(messages) == 1
-    # Gateway should NOT have been called
-    gateway.call_once.assert_not_called()
+    with patch("core.policy.skill_relevance.SKILL_LLM_MATCH", False):
+        policy = SkillRelevancePolicy(model_gateway=gateway)
+        assert policy._use_llm is False
+        # Verify keyword matching still works
+        state = SessionState(conversation_messages=[
+            {"role": "user", "content": "基于csv文件生成分析报告"},
+        ])
+        state.skill_catalog = {
+            "analysis-report": _make_meta("analysis-report", "生成分析报告", "生成分析报告,数据报告,HTML报告"),
+        }
+        messages = policy.before_model_call(state, RunState())
+        assert len(messages) == 1
+        # Gateway should NOT have been called
+        gateway.call_once.assert_not_called()
 
 
 def test_llm_match_enabled_dispatches_to_llm():
@@ -217,3 +221,72 @@ def test_no_gateway_disables_llm():
     with patch("core.policy.skill_relevance.SKILL_LLM_MATCH", True):
         policy = SkillRelevancePolicy(model_gateway=None)
         assert policy._use_llm is False
+
+
+def test_extract_current_user_context_ignores_assistant_history():
+    policy = SkillRelevancePolicy()
+    state = SessionState(conversation_messages=[
+        {"role": "user", "content": "帮我看看 gstack 是做什么的"},
+        {"role": "assistant", "content": "skill creator 可以用来 create a new skill and extend capabilities"},
+        {"role": "user", "content": "这个项目的 23 个 skill 是 subagent 吗？"},
+    ])
+
+    assert policy._extract_recent_context(state.conversation_messages) == "这个项目的 23 个 skill 是 subagent 吗？".lower()
+
+
+def test_llm_match_for_skill_creator_requires_explicit_create_intent():
+    mock_resp = ModelResponse(
+        content="skill-creator",
+        tool_calls=[],
+        finish_reason="end_turn",
+        prompt_tokens=150,
+        completion_tokens=5,
+        reasoning="",
+        reasoning_signature="",
+    )
+    gateway = MagicMock(spec=ModelGateway)
+    gateway.call_once.return_value = mock_resp
+
+    with patch("core.policy.skill_relevance.SKILL_LLM_MATCH", True):
+        policy = SkillRelevancePolicy(model_gateway=gateway)
+        state = SessionState(conversation_messages=[
+            {"role": "user", "content": "这个项目的 23 个 skill，运行起来是不同的 subagent 吗？"},
+        ])
+        state.skill_catalog = {
+            "skill-creator": _make_meta(
+                "skill-creator",
+                "Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations.",
+            ),
+        }
+
+        assert policy.before_model_call(state, RunState()) == []
+
+
+def test_llm_match_for_skill_creator_allows_explicit_create_intent():
+    mock_resp = ModelResponse(
+        content="skill-creator",
+        tool_calls=[],
+        finish_reason="end_turn",
+        prompt_tokens=150,
+        completion_tokens=5,
+        reasoning="",
+        reasoning_signature="",
+    )
+    gateway = MagicMock(spec=ModelGateway)
+    gateway.call_once.return_value = mock_resp
+
+    with patch("core.policy.skill_relevance.SKILL_LLM_MATCH", True):
+        policy = SkillRelevancePolicy(model_gateway=gateway)
+        state = SessionState(conversation_messages=[
+            {"role": "user", "content": "帮我创建一个新的 weather skill，并写好 SKILL.md"},
+        ])
+        state.skill_catalog = {
+            "skill-creator": _make_meta(
+                "skill-creator",
+                "Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Codex's capabilities with specialized knowledge, workflows, or tool integrations.",
+            ),
+        }
+
+        messages = policy.before_model_call(state, RunState())
+        assert len(messages) == 1
+        assert "skill-creator" in messages[0]["content"]
