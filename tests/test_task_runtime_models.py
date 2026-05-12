@@ -1,7 +1,10 @@
 from dataclasses import fields
+from types import SimpleNamespace
 
 from core.query.reducers import apply_session_update
 from core.session.state import SessionState, TodoItem
+from core.session.subagent import SubagentStopReason
+from core.tasks.dispatcher import compile_task_packet, normalize_subagent_result
 from core.tasks.models import TaskExecutionMode, TaskPacket, TaskRecord, TaskRunResult, TaskState, TaskStatus
 from core.tasks.projection import project_task_state_to_todo_items
 from core.tools.context import SessionUpdate, SessionUpdateKind
@@ -127,3 +130,58 @@ def test_projection_uses_subject_for_active_form_after_task_simplification() -> 
     assert items[0].content == "Inspect runtime"
     assert items[0].active_form == "Inspect runtime"
     assert items[0].status == "in_progress"
+
+
+def test_compile_task_packet_prefers_description_and_done_criteria() -> None:
+    task = TaskRecord(
+        task_id="task-1",
+        subject="Inspect runtime",
+        goal="Fix subagent runtime",
+        status=TaskStatus.PENDING,
+        execution_mode=TaskExecutionMode.FRESH_SUBAGENT,
+        agent_type="plan",
+        description="Read runtime files and summarize the broken data flow.",
+        done_criteria=["Name broken functions", "List exact files to edit"],
+    )
+
+    packet = compile_task_packet(task)
+
+    assert packet.task_id == "task-1"
+    assert packet.title == "Inspect runtime"
+    assert packet.agent_type == "plan"
+    assert "Fix subagent runtime" in packet.directive
+    assert "Read runtime files and summarize the broken data flow." in packet.directive
+    assert packet.done_criteria == ["Name broken functions", "List exact files to edit"]
+
+
+def test_normalize_subagent_result_maps_stop_reason_and_turns() -> None:
+    result = SimpleNamespace(
+        success=False,
+        output="max turns reached",
+        files_modified=["core/tasks/models.py"],
+        stop_reason=SubagentStopReason.MAX_TURNS,
+        turns_used=12,
+    )
+
+    normalized = normalize_subagent_result("task-1", result)
+
+    assert normalized.task_id == "task-1"
+    assert normalized.status == TaskStatus.FAILED
+    assert normalized.stop_reason == "max_turns"
+    assert normalized.turns_used == 12
+    assert normalized.files_modified == ["core/tasks/models.py"]
+
+
+def test_normalize_subagent_result_marks_cancelled_tasks() -> None:
+    result = SimpleNamespace(
+        success=False,
+        output="cancelled",
+        files_modified=[],
+        stop_reason=SubagentStopReason.CANCELLED,
+        turns_used=3,
+    )
+
+    normalized = normalize_subagent_result("task-1", result)
+
+    assert normalized.status == TaskStatus.CANCELLED
+    assert normalized.stop_reason == "cancelled"
