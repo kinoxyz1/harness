@@ -1,10 +1,8 @@
-"""任务规划策略 — 在执行前强制先完成 task_plan。
+"""任务规划策略 — 记录 task_plan 的调用状态。
 
 职责：
-  1. 当 task_planning_required=True 且 TaskState 为空时，限制可用工具到 pre-plan 白名单，
-     并注入提醒消息要求模型先调用 task_plan。
-  2. 当 task_plan 工具被调用后，解除限制。
-  3. 当 skill 工具被调用但 TaskState 仍为空时，重新设置 task_planning_required 标记。
+  当 task_plan 工具被调用后，清除 task_planning_required 标记并解除工具限制。
+  不再在 skill 加载后强制触发 task_planning——由系统提示词引导 LLM 自行判断复杂度。
 """
 from __future__ import annotations
 
@@ -37,9 +35,6 @@ class TaskPlanningPolicy:
             run_state.task_planning_required = False
             run_state.task_planning_reason = None
             run_state.allowed_tools_override = None
-        elif any(name == "skill" for name in batch_result.tool_names) and not session_state.task_state.tasks_by_id:
-            run_state.task_planning_required = True
-            run_state.task_planning_reason = "post_skill"
         return []
 
     def should_stop(self, session_state, run_state) -> str | None:
