@@ -24,19 +24,16 @@ class SubagentType(str, Enum):
     EXPLORE = "explore"
     PLAN = "plan"
     GENERAL = "general"
-    FORK = "fork"
 
 
 class SubagentContextMode(str, Enum):
     FRESH = "fresh"
-    FORK = "fork"
 
 
 class SubagentStopReason(str, Enum):
     COMPLETED = "completed"
     MAX_TURNS = "max_turns"
     API_ERROR = "api_error"
-    TOOL_ERROR = "tool_error"
     EMPTY_RESPONSE = "empty_response"
     CANCELLED = "cancelled"
 
@@ -143,6 +140,8 @@ def _compute_allowed_names(definition: SubagentDefinition) -> set[str]:
 
 def coerce_stop_reason(value: str) -> SubagentStopReason:
     """将 QueryLoop 的 stop reason 规范化为子代理 stop reason。"""
+    if value == "aborted":
+        return SubagentStopReason.CANCELLED
     try:
         return SubagentStopReason(value)
     except ValueError:
@@ -167,18 +166,7 @@ def render_subagent_summary(result: SubagentRunResult) -> str:
 
 
 def _render_fresh_packet(packet: TaskPacket) -> str:
-    sections = [
-        f"Task: {packet.title}",
-        "",
-        "Directive:",
-        packet.directive,
-    ]
-    if packet.known_facts:
-        sections.extend(["", "Known facts:"] + [f"- {item}" for item in packet.known_facts])
-    if packet.out_of_scope:
-        sections.extend(["", "Out of scope:"] + [f"- {item}" for item in packet.out_of_scope])
-    if packet.expected_output:
-        sections.extend(["", "Expected output:"] + [f"- {item}" for item in packet.expected_output])
+    sections = [f"Task: {packet.title}", "", "Directive:", packet.directive]
     if packet.done_criteria:
         sections.extend(["", "Done criteria:"] + [f"- {item}" for item in packet.done_criteria])
     return "\n".join(sections)
@@ -198,6 +186,49 @@ def _preload_required_skills(engine, parent_context, skill_ids, turn):
         engine.state.invoked_skills[skill_id] = record
 
 
+class SubagentBridgeRenderer:
+    """Bridges subagent tool events to parent via emit callback."""
+
+    def __init__(self, *, task_id: str, agent_type: str, emit) -> None:
+        self._task_id = task_id
+        self._agent_type = agent_type
+        self._emit = emit
+
+    def _base(self, event: str) -> dict[str, Any]:
+        return {"event": event, "task_id": self._task_id, "agent_type": self._agent_type}
+
+    def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
+        self._emit({**self._base("subagent_tool_call"), "tool_name": name, "tool_args": args})
+
+    def show_tool_result(self, name: str, output: str) -> None:
+        self._emit({**self._base("subagent_tool_result"), "tool_name": name, "content": output})
+
+    def show_status(self, message: str) -> None:
+        self._emit({**self._base("subagent_status"), "content": message})
+
+    def show_thinking(self, title: str, reasoning: str) -> None:
+        self._emit({**self._base("subagent_thinking"), "title": title, "content": reasoning})
+
+    def show_assistant(self, content: str | None) -> None:
+        if content:
+            self._emit({**self._base("subagent_message"), "content": content})
+
+    def show_timing(self, elapsed: float, prompt_tokens: int, completion_tokens: int, finish_reason: str) -> None:
+        return None
+
+    def show_current_todo(self, item, completed: int, total: int) -> None:
+        return None
+
+    def show_progress(self, items) -> None:
+        return None
+
+    def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
+        return None
+
+    def show_error(self, message: str) -> None:
+        self._emit({**self._base("subagent_error"), "content": message})
+
+
 class SubagentRuntime:
     """负责运行隔离上下文中的子代理。"""
 
@@ -212,7 +243,7 @@ class SubagentRuntime:
         self._llm_factory = llm_factory or AnthropicClient
         self._tools_registry = tools_registry
 
-    def run(self, request: SubagentRequest) -> SubagentRunResult:
+    def run(self, request: SubagentRequest, emit=None) -> SubagentRunResult:
         """运行一个 fresh 模式的子代理任务。"""
         definition = get_subagent_definition(request.agent_type)
         if definition.context_mode is not SubagentContextMode.FRESH:
@@ -220,6 +251,18 @@ class SubagentRuntime:
 
         working_dir = self._parent_context.working_dir if self._parent_context else os.getcwd()
         max_turns = request.max_turns or definition.default_max_turns
+
+        # Bridge renderer for event forwarding
+        bridge = (
+            SubagentBridgeRenderer(
+                task_id=request.task_packet.task_id,
+                agent_type=request.agent_type.value,
+                emit=emit,
+            )
+            if emit is not None
+            else None
+        )
+        child_display = RunDisplayOptions(quiet=emit is None)
 
         # 构建系统提示
         project_root = working_dir if definition.include_project_context else None
@@ -237,31 +280,52 @@ class SubagentRuntime:
         # 创建工具上下文
         tool_context = ToolUseContext(working_dir=working_dir, max_turns=max_turns)
 
-        # 创建 session engine
+        # 创建 session engine - pass tools and renderer explicitly
         engine = SessionEngine(
             model_gateway=ModelGateway(self._llm_factory()),
-            tool_runtime=ToolExecutorRuntime(sub_registry, tool_context, display=RunDisplayOptions(quiet=True)),
+            tool_runtime=ToolExecutorRuntime(sub_registry, tool_context, display=child_display, renderer=bridge),
             tool_context=tool_context,
             policy_runner=PolicyRunner([MaxTurnsPolicy(max_turns)]),
             recovery=RecoveryManager(),
             view_builder=MessageViewBuilder(tools=sub_schemas),
+            tools=sub_schemas,
+            renderer=bridge,
         )
 
-        # Set system prompt override so PromptAssembler includes it in stable context
+        # Set system prompt override
         engine.state.system_prompt_override = system_prompt
 
-        # Preload required skills into the fresh engine
+        # Preload required skills
         _preload_required_skills(engine, self._parent_context, request.preloaded_skill_ids, turn=0)
+
+        # Emit start event
+        if emit is not None:
+            emit({"event": "subagent_start", "task_id": request.task_packet.task_id, "agent_type": request.agent_type.value})
 
         # 执行任务
         prompt_text = _render_fresh_packet(request.task_packet)
         result = engine.submit_user_message(prompt_text)
 
+        # Normalize stop reason
+        stop_reason = coerce_stop_reason(result.stop_reason.value if hasattr(result.stop_reason, "value") else str(result.stop_reason))
+
+        # Emit done event
+        if emit is not None:
+            emit(
+                {
+                    "event": "subagent_done",
+                    "task_id": request.task_packet.task_id,
+                    "agent_type": request.agent_type.value,
+                    "stop_reason": stop_reason.value,
+                    "turns_used": result.turns_used,
+                }
+            )
+
         return SubagentRunResult(
             request=request,
             output=result.final_output,
             success=result.success,
-            stop_reason=coerce_stop_reason(result.stop_reason),
+            stop_reason=stop_reason,
             turns_used=result.turns_used,
             files_modified=list(result.files_modified),
         )

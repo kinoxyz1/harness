@@ -1,20 +1,28 @@
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from core.session.subagent import _render_fresh_packet, _preload_required_skills
+from core.query.result import QueryResult, StopReason
+from core.session.state import SessionState
+from core.session.subagent import (
+    SubagentRequest,
+    SubagentRuntime,
+    SubagentStopReason,
+    SubagentType,
+    _render_fresh_packet,
+    _preload_required_skills,
+    coerce_stop_reason,
+)
 from core.tasks.models import TaskExecutionMode, TaskPacket
+from core.tools.context import ToolUseContext
 
 
 def test_render_fresh_packet_contains_expected_sections() -> None:
     packet = TaskPacket(
         task_id="task-1",
-        mode=TaskExecutionMode.FRESH_SUBAGENT,
         agent_type="general",
         title="Inspect runtime",
         directive="Inspect runtime deeply",
-        known_facts=["QueryLoop batches readonly tools"],
-        out_of_scope=["Do not edit files"],
-        expected_output=["A short diagnosis"],
         done_criteria=["At least one runtime breakpoint identified"],
     )
 
@@ -22,14 +30,11 @@ def test_render_fresh_packet_contains_expected_sections() -> None:
 
     assert "Task: Inspect runtime" in rendered
     assert "Directive:" in rendered
-    assert "Known facts:" in rendered
-    assert "Do not edit files" in rendered
+    assert "Done criteria:" in rendered
 
 
 def test_preload_required_skills_records_invoked_skills(tmp_path: Path) -> None:
-    from core.session.state import SessionState
     from core.skills import SkillRegistry
-    from core.tools.context import ToolUseContext
 
     skill_dir = tmp_path / ".harness" / "skills" / "analysis-report"
     skill_dir.mkdir(parents=True)
@@ -38,12 +43,102 @@ def test_preload_required_skills_records_invoked_skills(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    registry = SkillRegistry()
-    registry.discover(skill_dir.parent, working_dir=tmp_path)
+    skill_registry = SkillRegistry()
+    skill_registry.discover(skill_dir.parent, working_dir=tmp_path)
     parent_context = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
-    parent_context.bind_runtime(session_state=None, skill_registry=registry)
+    parent_context.bind_runtime(session_state=None, skill_registry=skill_registry)
 
     engine = SimpleNamespace(state=SessionState(conversation_messages=[]))
     _preload_required_skills(engine, parent_context, ["analysis-report"], turn=0)
 
     assert "analysis-report" in engine.state.invoked_skills
+
+
+def test_render_fresh_packet_includes_done_criteria() -> None:
+    packet = TaskPacket(
+        task_id="task-1",
+        title="Inspect runtime",
+        directive="Fix subagent runtime\n\nContext:\nRead runtime files first.",
+        done_criteria=["List exact files", "Explain the broken data flow"],
+        agent_type="plan",
+    )
+
+    rendered = _render_fresh_packet(packet)
+
+    assert "Task: Inspect runtime" in rendered
+    assert "Read runtime files first." in rendered
+    assert "Done criteria:" in rendered
+    assert "Explain the broken data flow" in rendered
+
+
+def test_coerce_stop_reason_maps_aborted_to_cancelled() -> None:
+    assert coerce_stop_reason("aborted") == SubagentStopReason.CANCELLED
+
+
+def test_subagent_runtime_emits_bridge_events_and_passes_tools(tmp_path) -> None:
+    parent = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
+    parent.bind_runtime(session_state=SessionState(conversation_messages=[]), skill_registry=None)
+    runtime = SubagentRuntime(parent_context=parent)
+    packet = TaskPacket(
+        task_id="task-1",
+        title="Inspect runtime",
+        directive="Fix runtime",
+        done_criteria=["List files"],
+        agent_type="general",
+    )
+    request = SubagentRequest(task_packet=packet, agent_type=SubagentType.GENERAL)
+    captured = {}
+    events = []
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.state = SessionState(conversation_messages=[])
+
+        def submit_user_message(self, prompt):
+            captured["prompt"] = prompt
+            captured["renderer"].show_tool_call("find", {"pattern": "*.py"})
+            captured["renderer"].show_tool_result("find", "core/tasks/models.py")
+            return QueryResult(
+                final_output="done",
+                stop_reason=StopReason.COMPLETED,
+                success=True,
+                turns_used=2,
+                files_modified=["core/tasks/models.py"],
+            )
+
+    with patch("core.session.subagent.SessionEngine", FakeEngine):
+        result = runtime.run(request, emit=events.append)
+
+    assert captured["tools"] is not None
+    assert events[0]["event"] == "subagent_start"
+    assert events[1]["event"] == "subagent_tool_call"
+    assert events[2]["event"] == "subagent_tool_result"
+    assert events[-1]["event"] == "subagent_done"
+    assert all(event["task_id"] == "task-1" for event in events)
+    assert result.stop_reason == SubagentStopReason.COMPLETED
+
+
+def test_subagent_runtime_keeps_parent_session_state_isolated(tmp_path) -> None:
+    parent_state = SessionState(conversation_messages=[])
+    parent = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
+    parent.bind_runtime(session_state=parent_state, skill_registry=None)
+    runtime = SubagentRuntime(parent_context=parent)
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            self.state = SessionState(conversation_messages=[])
+
+        def submit_user_message(self, prompt):
+            self.state.todo_state.items.append(SimpleNamespace(content="child", active_form="child", status="pending"))
+            return QueryResult(final_output="done", stop_reason=StopReason.COMPLETED, success=True, turns_used=1)
+
+    with patch("core.session.subagent.SessionEngine", FakeEngine):
+        runtime.run(
+            SubagentRequest(
+                task_packet=TaskPacket(task_id="task-1", title="Inspect runtime", directive="Fix runtime"),
+                agent_type=SubagentType.GENERAL,
+            )
+        )
+
+    assert parent_state.todo_state.items == []

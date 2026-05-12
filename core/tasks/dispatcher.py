@@ -25,7 +25,6 @@ def normalize_subagent_result(task_id: str, result: SubagentRunResult) -> TaskRu
         SubagentStopReason.MAX_TURNS: TaskStatus.FAILED,
         SubagentStopReason.API_ERROR: TaskStatus.FAILED,
         SubagentStopReason.EMPTY_RESPONSE: TaskStatus.FAILED,
-        SubagentStopReason.TOOL_ERROR: TaskStatus.FAILED,
     }
     return TaskRunResult(
         task_id=task_id,
