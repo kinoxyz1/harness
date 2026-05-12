@@ -185,3 +185,26 @@ def test_normalize_subagent_result_marks_cancelled_tasks() -> None:
 
     assert normalized.status == TaskStatus.CANCELLED
     assert normalized.stop_reason == "cancelled"
+
+
+def test_normalize_subagent_result_maps_every_supported_stop_reason() -> None:
+    cases = {
+        SubagentStopReason.COMPLETED: TaskStatus.COMPLETED,
+        SubagentStopReason.CANCELLED: TaskStatus.CANCELLED,
+        SubagentStopReason.MAX_TURNS: TaskStatus.FAILED,
+        SubagentStopReason.API_ERROR: TaskStatus.FAILED,
+        SubagentStopReason.EMPTY_RESPONSE: TaskStatus.FAILED,
+    }
+    for reason, expected_status in cases.items():
+        normalized = normalize_subagent_result(
+            "task-1",
+            SimpleNamespace(
+                success=(reason == SubagentStopReason.COMPLETED),
+                output=reason.value,
+                files_modified=[],
+                stop_reason=reason,
+                turns_used=1,
+            ),
+        )
+        assert normalized.status == expected_status
+        assert normalized.stop_reason == reason.value

@@ -173,3 +173,24 @@ def test_task_execute_is_marked_concurrency_safe() -> None:
     from core.tools.builtin.task_execute import ANNOTATIONS
 
     assert ANNOTATIONS["concurrency_safe"] is True
+
+
+def test_task_execute_rejects_legacy_execution_mode_value(tmp_path) -> None:
+    from core.tools.builtin.task_execute import handle
+
+    state = SessionState(conversation_messages=[])
+    legacy_task = TaskRecord(
+        task_id="task-1",
+        subject="Legacy",
+        goal="Legacy",
+        status=TaskStatus.PENDING,
+        execution_mode=TaskExecutionMode.FRESH_SUBAGENT,
+    )
+    object.__setattr__(legacy_task, "execution_mode", "fork_subagent")
+    state.task_state.tasks_by_id["task-1"] = legacy_task
+    state.task_state.ordered_task_ids = ["task-1"]
+
+    result = handle({"task_id": "task-1"}, _context(state, tmp_path))
+
+    assert result.status.value == "failure"
+    assert result.error == "unsupported_execution_mode"

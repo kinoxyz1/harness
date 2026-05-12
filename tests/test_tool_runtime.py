@@ -82,3 +82,60 @@ def test_serial_tool_renders_call_then_result_before_next_tool(tmp_path) -> None
         ("call", "write_b"),
         ("result", "write_b", "write ok"),
     ]
+
+
+def test_parallel_runtime_keeps_files_modified_scoped_per_run(tmp_path) -> None:
+    from core.tools.context import RunUpdate, RunUpdateKind
+
+    registry = ToolRegistry()
+
+    class WriteA:
+        SCHEMA = {"name": "write_a", "input_schema": {"type": "object", "properties": {}}}
+        READONLY = False
+        ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": True, "concurrency_safe": False}
+
+        @staticmethod
+        def handle(args, context):
+            return ToolInvocationOutcome(
+                messages=[make_tool_message(context, "ok")],
+                run_updates=[RunUpdate(kind=RunUpdateKind.MARK_FILE_MODIFIED, payload={"path": "/tmp/a.txt"})],
+            )
+
+    class WriteB:
+        SCHEMA = {"name": "write_b", "input_schema": {"type": "object", "properties": {}}}
+        READONLY = False
+        ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": True, "concurrency_safe": False}
+
+        @staticmethod
+        def handle(args, context):
+            return ToolInvocationOutcome(
+                messages=[make_tool_message(context, "ok")],
+                run_updates=[RunUpdate(kind=RunUpdateKind.MARK_FILE_MODIFIED, payload={"path": "/tmp/b.txt"})],
+            )
+
+    registry.register(WriteA)
+    registry.register(WriteB)
+
+    context = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
+    state = SessionState(conversation_messages=[])
+    context.bind_runtime(session_state=state, skill_registry=None)
+    runtime = ToolExecutorRuntime(registry, context)
+
+    run_state_a = RunState()
+    runtime.execute_batch(
+        [ToolCall(idx=0, name="write_a", call_id="call_a", args={})],
+        run_state=run_state_a,
+        apply_session_update=lambda update: apply_session_update(state, update),
+        apply_run_update=apply_run_update,
+    )
+
+    run_state_b = RunState()
+    runtime.execute_batch(
+        [ToolCall(idx=0, name="write_b", call_id="call_b", args={})],
+        run_state=run_state_b,
+        apply_session_update=lambda update: apply_session_update(state, update),
+        apply_run_update=apply_run_update,
+    )
+
+    assert run_state_a.files_modified == ["/tmp/a.txt"]
+    assert run_state_b.files_modified == ["/tmp/b.txt"]
