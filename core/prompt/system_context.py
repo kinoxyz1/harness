@@ -31,6 +31,11 @@ _FRAMEWORK_PROMPT = """\
 TaskState 激活时不要再把 todo 当权威状态；todo 只是从任务投影出的用户视图。
 LOCAL 任务直接用普通工具（bash/edit_file等）执行，不要用 task_execute；完成后调用 task_plan 更新状态。
 fresh_subagent 任务用 task_execute 执行。
+选择 execution_mode 的原则：评估每个任务的复杂度和上下文隔离需求。
+适合 fresh_subagent 的任务特征：需要多轮探索/分析、能独立完成不依赖主上下文、复杂度足以拆分为独立子流程。
+适合 local 的任务特征：简单直接的操作、需要操作当前项目上下文、单步即可完成。
+以下场景应使用 fresh_subagent：网络搜索/信息检索、需要探索多个文件的代码分析、独立的调研或探索性任务。
+以下场景使用 local：文件编辑、简单 bash 命令、需要操作当前项目上下文的任务。
 如果 skill 刚展开，而任务明显进入多步骤工作流，在继续深入执行之前先考虑 task_plan。
 优先使用工具而非文字描述。
 
