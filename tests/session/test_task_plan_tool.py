@@ -84,7 +84,7 @@ def test_task_plan_schema_exposes_redesign_fields_without_fork() -> None:
     assert item_props["execution_mode"]["enum"] == ["local", "fresh_subagent"]
 
 
-def test_build_task_state_preserves_terminal_tasks_and_cancels_omitted_live_tasks() -> None:
+def test_build_task_state_drops_old_tasks_not_in_new_plan() -> None:
     previous = TaskState(
         tasks_by_id={
             "task-old-done": TaskRecord(
@@ -119,9 +119,9 @@ def test_build_task_state_preserves_terminal_tasks_and_cancels_omitted_live_task
         turn_count=9,
     )
 
-    assert next_state.ordered_task_ids == ["task-new", "task-old-done", "task-old-live"]
-    assert next_state.tasks_by_id["task-old-done"].status == TaskStatus.COMPLETED
-    assert next_state.tasks_by_id["task-old-live"].status == TaskStatus.CANCELLED
+    assert next_state.ordered_task_ids == ["task-new"]
+    assert "task-old-done" not in next_state.tasks_by_id
+    assert "task-old-live" not in next_state.tasks_by_id
     assert next_state.current_task_id == "task-new"
 
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
 
 MAX_TASKS = 20
@@ -35,27 +33,17 @@ def validate_tasks(raw_tasks: list[dict], *, previous: TaskState | None) -> None
 def build_task_state(raw_tasks: list[dict], *, previous: TaskState | None, turn_count: int) -> TaskState:
     validate_tasks(raw_tasks, previous=previous)
     previous = previous or TaskState()
-    incoming: list[TaskRecord] = []
-    incoming_ids: set[str] = set()
 
+    incoming: list[TaskRecord] = []
     for index, raw in enumerate(raw_tasks):
         task = normalize_task_payload(raw, index=index, previous=previous)
         prev = previous.tasks_by_id.get(task.task_id)
         if prev is not None and prev.status in TERMINAL_STATUSES and task.status != prev.status:
             raise ValueError(f"cannot reopen terminal task_id: {task.task_id}")
         incoming.append(task)
-        incoming_ids.add(task.task_id)
 
-    preserved: list[TaskRecord] = []
-    for task_id in previous.ordered_task_ids:
-        if task_id in incoming_ids:
-            continue
-        prev = previous.tasks_by_id[task_id]
-        preserved.append(prev if prev.status in TERMINAL_STATUSES else replace(prev, status=TaskStatus.CANCELLED))
-
-    ordered = incoming + preserved
-    tasks_by_id = {task.task_id: task for task in ordered}
-    ordered_task_ids = [task.task_id for task in ordered]
+    tasks_by_id = {task.task_id: task for task in incoming}
+    ordered_task_ids = [task.task_id for task in incoming]
     current_task_id = next((task.task_id for task in incoming if task.status == TaskStatus.IN_PROGRESS), None)
     return TaskState(
         tasks_by_id=tasks_by_id,
