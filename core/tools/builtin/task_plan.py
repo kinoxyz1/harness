@@ -36,8 +36,15 @@ SCHEMA: dict[str, Any] = {
                         },
                         "execution_mode": {
                             "type": "string",
-                            "enum": ["local", "fresh_subagent", "fork_subagent"],
+                            "enum": ["local", "fresh_subagent"],
                         },
+                        "agent_type": {
+                            "type": "string",
+                            "enum": ["explore", "plan", "general"],
+                        },
+                        "description": {"type": "string"},
+                        "done_criteria": {"type": "array", "items": {"type": "string"}},
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["subject", "goal"],
                 },
