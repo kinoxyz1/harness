@@ -62,3 +62,74 @@ def test_projection_keeps_todo_items_compatible_with_existing_renderer() -> None
     )
 
     assert session.todo_state.items == [TodoItem(content="Do work", active_form="Do work", status="completed")]
+
+
+from dataclasses import fields
+
+from core.tasks.models import (
+    TaskPacket,
+    TaskRunResult,
+)
+from core.tasks.projection import project_task_state_to_todo_items
+
+
+def test_task_execution_mode_only_exposes_local_and_fresh_subagent() -> None:
+    assert [mode.value for mode in TaskExecutionMode] == ["local", "fresh_subagent"]
+
+
+def test_task_record_fields_match_redesign_contract() -> None:
+    assert [field.name for field in fields(TaskRecord)] == [
+        "task_id",
+        "subject",
+        "goal",
+        "status",
+        "execution_mode",
+        "agent_type",
+        "description",
+        "done_criteria",
+        "depends_on",
+        "result_summary",
+        "files_modified",
+        "stop_reason",
+        "created_at_turn",
+        "turns_used",
+    ]
+
+
+def test_task_packet_fields_match_redesign_contract() -> None:
+    assert [field.name for field in fields(TaskPacket)] == [
+        "task_id",
+        "title",
+        "directive",
+        "done_criteria",
+        "agent_type",
+    ]
+
+
+def test_task_run_result_fields_match_redesign_contract() -> None:
+    assert [field.name for field in fields(TaskRunResult)] == [
+        "task_id",
+        "success",
+        "status",
+        "summary",
+        "files_modified",
+        "stop_reason",
+        "turns_used",
+    ]
+
+
+def test_projection_uses_subject_for_active_form_after_task_simplification() -> None:
+    task = TaskRecord(
+        task_id="task-1",
+        subject="Inspect runtime",
+        goal="Find the runtime boundary bug",
+        status=TaskStatus.IN_PROGRESS,
+        execution_mode=TaskExecutionMode.LOCAL,
+    )
+    state = TaskState(tasks_by_id={"task-1": task}, ordered_task_ids=["task-1"], current_task_id="task-1")
+
+    items = project_task_state_to_todo_items(state)
+
+    assert items[0].content == "Inspect runtime"
+    assert items[0].active_form == "Inspect runtime"
+    assert items[0].status == "in_progress"

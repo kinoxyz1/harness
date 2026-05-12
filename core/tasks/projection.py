@@ -19,7 +19,7 @@ def project_task_state_to_todo_items(task_state: TaskState) -> list[TodoItem]:
         items.append(
             TodoItem(
                 content=task.subject,
-                active_form=task.active_form or task.subject,
+                active_form=task.subject,
                 status=map_task_status_to_todo_status(task.status),
                 workflow_ref=None,
             )
