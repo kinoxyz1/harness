@@ -1,7 +1,10 @@
+from dataclasses import fields
+
 from core.query.reducers import apply_session_update
 from core.session.state import SessionState, TodoItem
+from core.tasks.models import TaskExecutionMode, TaskPacket, TaskRecord, TaskRunResult, TaskState, TaskStatus
+from core.tasks.projection import project_task_state_to_todo_items
 from core.tools.context import SessionUpdate, SessionUpdateKind
-from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
 
 
 def _task(task_id: str, subject: str, status: TaskStatus = TaskStatus.PENDING) -> TaskRecord:
@@ -62,15 +65,6 @@ def test_projection_keeps_todo_items_compatible_with_existing_renderer() -> None
     )
 
     assert session.todo_state.items == [TodoItem(content="Do work", active_form="Do work", status="completed")]
-
-
-from dataclasses import fields
-
-from core.tasks.models import (
-    TaskPacket,
-    TaskRunResult,
-)
-from core.tasks.projection import project_task_state_to_todo_items
 
 
 def test_task_execution_mode_only_exposes_local_and_fresh_subagent() -> None:
