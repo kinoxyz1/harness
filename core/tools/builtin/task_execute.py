@@ -25,7 +25,7 @@ SCHEMA: dict[str, Any] = {
 }
 
 READONLY = False
-ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": False, "concurrency_safe": False}
+ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": False, "concurrency_safe": True}
 
 
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
@@ -62,24 +62,42 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
             messages=[make_tool_message(context, f"Unsupported execution_mode for task_execute: {task.execution_mode}")],
         )
 
+    # Dependency checking
+    for dep_id in task.depends_on:
+        dep = state.task_state.tasks_by_id.get(dep_id)
+        if dep is None:
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.FAILURE,
+                error="missing_dependency",
+                messages=[make_tool_message(context, f"Missing dependency: {dep_id}")],
+            )
+        if dep.status != TaskStatus.COMPLETED:
+            return ToolInvocationOutcome(
+                status=ToolOutcomeStatus.FAILURE,
+                error="dependency_not_ready",
+                messages=[make_tool_message(context, f"Dependency not completed: {dep_id}")],
+            )
+
+    # Compile packet and run subagent
     packet = compile_task_packet(task)
+    agent_type = SubagentType(task.agent_type) if task.agent_type else SubagentType.GENERAL
     runtime = SubagentRuntime(parent_context=context)
     sub_result = runtime.run(
         SubagentRequest(
             task_packet=packet,
-            agent_type=SubagentType.GENERAL,
-            preloaded_skill_ids=list(task.required_skills),
+            agent_type=agent_type,
         )
     )
     normalized = normalize_subagent_result(task.task_id, sub_result)
 
+    # Write back results to task
     next_task = replace(
         task,
-        packet_revision=packet.packet_revision,
         status=normalized.status,
         result_summary=normalized.summary,
         files_modified=list(normalized.files_modified),
-        failure_reason=normalized.failure_reason,
+        stop_reason=normalized.stop_reason,
+        turns_used=normalized.turns_used,
     )
 
     next_state = TaskState(
