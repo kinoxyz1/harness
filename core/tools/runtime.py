@@ -73,6 +73,20 @@ class ToolExecutorRuntime:
             return True
         return self._display.runtime_trace == "debug"
 
+    def _render_tool_call(self, call: ToolCall) -> None:
+        if self._renderer is None or self._display.quiet:
+            return
+        if not self._should_render_generic_tool_event(call.name):
+            return
+        self._renderer.show_tool_call(call.name, call.args)
+
+    def _render_tool_result(self, call: ToolCall, outcome: ToolInvocationOutcome) -> None:
+        if self._renderer is None or self._display.quiet:
+            return
+        if not self._should_render_generic_tool_event(call.name):
+            return
+        self._renderer.show_tool_result(call.name, self._first_content(outcome))
+
     def execute_batch(
         self,
         tool_calls: list[ToolCall],
@@ -134,12 +148,6 @@ class ToolExecutorRuntime:
 
         ordered_calls = tool_calls
         ordered_results = [all_results[call.idx] for call in ordered_calls]
-        if self._renderer is not None and not self._display.quiet:
-            for call, result in zip(ordered_calls, ordered_results):
-                if not self._should_render_generic_tool_event(call.name):
-                    continue
-                self._renderer.show_tool_call(call.name, call.args)
-                self._renderer.show_tool_result(call.name, self._first_content(result))
 
         return ToolBatchResult(
             messages=self._flatten_outcome_messages(ordered_calls, ordered_results),
@@ -189,6 +197,9 @@ class ToolExecutorRuntime:
         if not executable_calls:
             return results
 
+        for call in executable_calls:
+            self._render_tool_call(call)
+
         with ThreadPoolExecutor(max_workers=len(executable_calls)) as pool:
             futures = {
                 pool.submit(self._run_single, call, turn=turn): call
@@ -197,9 +208,9 @@ class ToolExecutorRuntime:
             for future in as_completed(futures):
                 call = futures[future]
                 try:
-                    results[call.idx] = future.result()
+                    result = future.result()
                 except Exception as e:
-                    results[call.idx] = ToolInvocationOutcome(
+                    result = ToolInvocationOutcome(
                         status=ToolOutcomeStatus.FAILURE,
                         error="internal_error",
                         messages=[
@@ -210,6 +221,8 @@ class ToolExecutorRuntime:
                             }
                         ],
                     )
+                results[call.idx] = result
+                self._render_tool_result(call, result)
 
         return results
 
@@ -229,11 +242,13 @@ class ToolExecutorRuntime:
             if self._trace_enabled():
                 sys.stdout.write(f"\033[36m[Runtime] ▶ 串行执行写工具：{call.name}\033[0m\n")
             allowed_tools = getattr(run_state, "allowed_tools_override", None)
+            self._render_tool_call(call)
             if allowed_tools is not None and call.name not in allowed_tools:
                 outcome = self._make_rejected_outcome(call, allowed_tools)
             else:
                 outcome = self._run_single(call, turn=turn)
             results[call.idx] = outcome
+            self._render_tool_result(call, outcome)
             self._apply_updates(
                 outcome=outcome,
                 run_state=run_state,

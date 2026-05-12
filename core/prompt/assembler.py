@@ -83,7 +83,7 @@ def _render_task_state(task_state: TaskState) -> str:
         task = task_state.tasks_by_id.get(task_id)
         if task is None:
             continue
-        label = task.active_form or task.subject
+        label = task.subject
         lines.append(
             f'  <task id="{task.task_id}" status="{task.status}" mode="{task.execution_mode}">{label}</task>'
         )
