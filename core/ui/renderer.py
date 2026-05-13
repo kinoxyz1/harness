@@ -6,10 +6,12 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
+from rich.text import Text
 from rich.theme import Theme
 
 from ..shared.interfaces import Renderer
@@ -156,9 +158,10 @@ class RichRenderer:
     def __init__(self, console: Console | None = None) -> None:
         self._console = console or Console()
         self._stream_turn_id: str | None = None
-        self._thinking_buffer: list[str] = []
-        self._content_buffer: list[str] = []
+        self._thinking_text: str = ""
+        self._content_text: str = ""
         self._last_flush_at = time.monotonic()
+        self._stream_live: Live | None = None
 
     def show_thinking(self, title: str, reasoning: str) -> None:
         """显示推理/思考过程。"""
@@ -242,32 +245,46 @@ class RichRenderer:
 
     def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
         self._stream_turn_id = turn_id
-        self._thinking_buffer = []
-        self._content_buffer = []
+        self._thinking_text = ""
+        self._content_text = ""
         self._last_flush_at = time.monotonic()
+        self._stream_live = Live(
+            console=self._console,
+            transient=True,
+            refresh_per_second=12,
+        )
+        self._stream_live.__enter__()
 
-    def _flush_stream_buffers(self, *, force: bool = False) -> None:
+    def _update_stream_display(self) -> None:
+        if self._stream_live is None:
+            return
+        parts: list[Text] = []
+        if self._thinking_text and STREAMING_THINKING_ENABLED:
+            parts.append(Text(f"思考 {self._thinking_text}", style="dim"))
+        if self._content_text:
+            if parts:
+                parts.append(Text(""))
+            parts.append(Text(self._content_text))
+        if parts:
+            self._stream_live.update(Group(*parts))
+
+    def _flush_stream_if_due(self, *, force: bool = False) -> None:
         elapsed_ms = (time.monotonic() - self._last_flush_at) * 1000
         if not force and elapsed_ms < STREAMING_RENDER_FLUSH_MS:
             return
-        if self._thinking_buffer and STREAMING_THINKING_ENABLED:
-            self._console.print(f"[dim]思考 {''.join(self._thinking_buffer)}[/dim]")
-            self._thinking_buffer = []
-        if self._content_buffer:
-            self._console.print(f"回复 {''.join(self._content_buffer)}")
-            self._content_buffer = []
+        self._update_stream_display()
         self._last_flush_at = time.monotonic()
 
     def consume_event(self, event: StreamEvent) -> None:
         if event.type == "thinking_delta":
-            self._thinking_buffer.append(str(event.payload.get("text", "")))
-            self._flush_stream_buffers()
+            self._thinking_text += str(event.payload.get("text", ""))
+            self._flush_stream_if_due()
             return
         if event.type == "content_delta":
-            self._content_buffer.append(str(event.payload.get("text", "")))
-            self._flush_stream_buffers()
+            self._content_text += str(event.payload.get("text", ""))
+            self._flush_stream_if_due()
             return
-        self._flush_stream_buffers(force=True)
+        self._flush_stream_if_due(force=True)
         if event.type == "tool_call_start":
             self.show_tool_call(event.payload["tool_name"], event.payload.get("tool_args", {}))
         elif event.type == "tool_call_result":
@@ -276,7 +293,11 @@ class RichRenderer:
             self.show_status(str(event.payload.get("message", "")))
 
     def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
-        self._flush_stream_buffers(force=True)
+        if self._stream_live is not None:
+            self._stream_live.__exit__(None, None, None)
+            self._stream_live = None
+        self._thinking_text = ""
+        self._content_text = ""
         self._stream_turn_id = None
 
 

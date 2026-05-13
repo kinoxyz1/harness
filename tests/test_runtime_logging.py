@@ -363,3 +363,54 @@ def test_renderer_hides_unknown_completion_elapsed() -> None:
 
     assert "完成: 2/2 个任务" in output
     assert "耗时:" not in output
+
+
+def test_streaming_render_flush_default_is_80ms() -> None:
+    from core.shared.config import STREAMING_RENDER_FLUSH_MS
+
+    assert STREAMING_RENDER_FLUSH_MS == 80
+
+
+def test_renderer_accumulates_thinking_and_content_during_stream() -> None:
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("thinking_delta", "turn-1", 1, "model", "live", {"text": "先想"}))
+    renderer.consume_event(make_event("content_delta", "turn-1", 2, "model", "live", {"text": "再答"}))
+
+    # Check accumulated state before end_stream clears it
+    assert renderer._thinking_text == "先想"
+    assert renderer._content_text == "再答"
+
+    renderer.end_stream("turn-1", {})
+
+    # After end_stream, Live is transient so streaming text is cleared
+    # The final formatted output (Panel + markdown) comes from show_thinking/show_assistant
+
+
+def test_renderer_flushes_and_renders_tool_event_during_stream() -> None:
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("content_delta", "turn-1", 1, "model", "live", {"text": "正在回答"}))
+    renderer.consume_event(
+        make_event(
+            "tool_call_start",
+            "turn-1",
+            2,
+            "tool",
+            "live",
+            {"tool_name": "read_file", "tool_args": {"path": "README.md"}},
+        )
+    )
+    renderer.end_stream("turn-1", {})
+
+    output = console.export_text()
+    # Tool call is rendered via show_tool_call (not transient)
+    assert "$ Read(" in output
