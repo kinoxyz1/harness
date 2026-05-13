@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import json
 import sys
 import threading
 import time
@@ -331,43 +332,103 @@ class AnthropicClient:
             sequence += 1
             return make_event(type, turn_id, sequence, "model", "live", payload)
 
-        try:
-            with self._client.messages.stream(**params) as stream:
-                input_tokens = 0
-                output_tokens = 0
-                finish_reason = "end_turn"
-                reasoning_signature = ""
-                yield emit("response_start")
-                for sdk_event in stream:
-                    if request_options.cancel_check and request_options.cancel_check():
-                        self._reset_client()
-                        raise RequestCancelledError("request cancelled by user")
-                    if sdk_event.type == "message_start":
-                        input_tokens = int(getattr(sdk_event.message.usage, "input_tokens", 0))
-                    elif sdk_event.type == "content_block_delta":
-                        delta = sdk_event.delta
-                        if getattr(delta, "type", "") == "thinking_delta":
-                            yield emit("thinking_delta", {"text": getattr(delta, "thinking", "")})
-                        elif getattr(delta, "type", "") == "text_delta":
-                            yield emit("content_delta", {"text": getattr(delta, "text", "")})
-                    elif sdk_event.type == "message_delta":
-                        finish_reason = getattr(sdk_event.delta, "stop_reason", finish_reason) or finish_reason
-                        output_tokens = int(getattr(sdk_event.usage, "output_tokens", output_tokens))
-                    elif sdk_event.type == "message_stop":
-                        yield emit(
-                            "response_completed",
-                            {
-                                "finish_reason": finish_reason,
-                                "prompt_tokens": input_tokens,
-                                "completion_tokens": output_tokens,
-                                "reasoning_signature": reasoning_signature,
-                            },
-                        )
-        except RequestCancelledError:
-            raise
-        except Exception as err:
-            self._raise_context_window_exceeded_if_needed(err)
-            raise
+        max_attempts = max(2, LLM_RETRY_ATTEMPTS)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._client.messages.stream(**params) as stream:
+                    input_tokens = 0
+                    output_tokens = 0
+                    finish_reason = "end_turn"
+                    reasoning_signature = ""
+                    content_blocks: dict[int, dict[str, Any]] = {}
+                    yield emit("response_start")
+                    _last_event_time = time.monotonic()
+                    for sdk_event in stream:
+                        _now = time.monotonic()
+                        _gap_ms = (_now - _last_event_time) * 1000
+                        if _gap_ms > 2000:
+                            sys.stderr.write(f"\n⏱ {_gap_ms:.0f}ms gap → {sdk_event.type}\n")
+                        _last_event_time = _now
+                        if request_options.cancel_check and request_options.cancel_check():
+                            self._reset_client()
+                            raise RequestCancelledError("request cancelled by user")
+                        if sdk_event.type == "message_start":
+                            input_tokens = int(getattr(sdk_event.message.usage, "input_tokens", 0))
+                        elif sdk_event.type == "content_block_start":
+                            block = sdk_event.content_block
+                            if getattr(block, "type", "") == "tool_use":
+                                raw_input = getattr(block, "input", "")
+                                initial_input = raw_input if isinstance(raw_input, dict) and raw_input else ""
+                                content_blocks[sdk_event.index] = {
+                                    "type": "tool_use",
+                                    "id": getattr(block, "id", ""),
+                                    "name": getattr(block, "name", ""),
+                                    "input": initial_input,
+                                }
+                        elif sdk_event.type == "content_block_delta":
+                            delta = sdk_event.delta
+                            if getattr(delta, "type", "") == "thinking_delta":
+                                yield emit("thinking_delta", {"text": getattr(delta, "thinking", "")})
+                            elif getattr(delta, "type", "") == "text_delta":
+                                yield emit("content_delta", {"text": getattr(delta, "text", "")})
+                            elif getattr(delta, "type", "") == "input_json_delta":
+                                block = content_blocks.get(sdk_event.index)
+                                if block and block.get("type") == "tool_use" and isinstance(block.get("input"), str):
+                                    block["input"] += getattr(delta, "partial_json", "")
+                                    yield emit("tool_input_delta", {
+                                        "tool_name": block.get("name", ""),
+                                        "partial_json": getattr(delta, "partial_json", ""),
+                                    })
+                        elif sdk_event.type == "content_block_stop":
+                            block = content_blocks.get(sdk_event.index)
+                            if block and block.get("type") == "tool_use":
+                                raw_input = block.get("input", {})
+                                if isinstance(raw_input, dict):
+                                    args = raw_input
+                                else:
+                                    try:
+                                        args = json.loads(raw_input) if raw_input else {}
+                                    except json.JSONDecodeError:
+                                        args = {}
+                                yield emit(
+                                    "tool_call_ready",
+                                    {
+                                        "tool_call": {
+                                            "id": block.get("id", ""),
+                                            "name": block.get("name", ""),
+                                            "args": args if isinstance(args, dict) else {},
+                                        }
+                                    },
+                                )
+                                content_blocks.pop(sdk_event.index, None)
+                        elif sdk_event.type == "message_delta":
+                            finish_reason = getattr(sdk_event.delta, "stop_reason", finish_reason) or finish_reason
+                            output_tokens = int(getattr(sdk_event.usage, "output_tokens", output_tokens))
+                        elif sdk_event.type == "message_stop":
+                            yield emit(
+                                "response_completed",
+                                {
+                                    "finish_reason": finish_reason,
+                                    "prompt_tokens": input_tokens,
+                                    "completion_tokens": output_tokens,
+                                    "reasoning_signature": reasoning_signature,
+                                },
+                            )
+                # Stream completed successfully — exit retry loop
+                break
+            except RequestCancelledError:
+                raise
+            except Exception as err:
+                self._raise_context_window_exceeded_if_needed(err)
+                if (
+                    attempt < max_attempts
+                    and isinstance(err, Exception)
+                    and self._is_transient_gateway_error(err)
+                ):
+                    time.sleep(LLM_RETRY_BACKOFF_SECONDS * attempt)
+                    self._reset_client()
+                    continue
+                raise
 
 
 def _parse_response(response: Any) -> LLMResponse:

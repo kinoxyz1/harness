@@ -124,7 +124,8 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
         proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         start = time.time()

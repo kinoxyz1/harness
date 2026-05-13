@@ -7,8 +7,11 @@ def _rough_text_tokens(value: Any) -> int:
     if value is None:
         return 0
     if isinstance(value, str):
-        return max(1, len(value) // 4)
-    return max(1, len(str(value)) // 4)
+        # CJK text averages ~1.5-2 chars/token, mixed content ~2-3.
+        # Using 2 as a safe middle ground that doesn't over-count ASCII
+        # but properly estimates CJK-heavy content.
+        return max(1, len(value) // 2)
+    return max(1, len(str(value)) // 2)
 
 
 def estimate_message_tokens(message: dict[str, Any]) -> int:

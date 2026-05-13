@@ -64,11 +64,17 @@ def should_require_task_planning(user_intent: str) -> bool:
         return False
 
     score = 0
-    if _match_any(text, _MULTI_GOAL_PATTERNS):
+    has_multi_goal = _match_any(text, _MULTI_GOAL_PATTERNS)
+    has_deliverable = _match_any(text, _DELIVERABLE_PATTERNS)
+    if has_multi_goal:
         score += 1
-    if _match_any(text, _DELIVERABLE_PATTERNS):
+    if has_deliverable:
         score += 1
-    if _match_any(text, _RESEARCH_PATTERNS):
+    # Research/lookup is inherently a simple operation — only boost score
+    # when the request also shows structural complexity (multi-goal or
+    # deliverable).  Pure "look something up" queries should not trigger
+    # task planning regardless of comma count.
+    if _match_any(text, _RESEARCH_PATTERNS) and (has_multi_goal or has_deliverable):
         score += 1
     if text.count("，") + text.count(",") + text.count("、") >= 2:
         score += 1

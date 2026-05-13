@@ -247,6 +247,7 @@ class RichRenderer:
         self._stream_turn_id = turn_id
         self._thinking_text = ""
         self._content_text = ""
+        self._tool_input_progress = 0
         self._last_flush_at = time.monotonic()
         self._stream_live = Live(
             console=self._console,
@@ -258,13 +259,22 @@ class RichRenderer:
     def _update_stream_display(self) -> None:
         if self._stream_live is None:
             return
-        parts: list[Text] = []
+        parts: list[Any] = []
         if self._thinking_text and STREAMING_THINKING_ENABLED:
-            parts.append(Text(f"思考 {self._thinking_text}", style="dim"))
+            parts.append(Text(self._thinking_text, style="dim"))
         if self._content_text:
             if parts:
                 parts.append(Text(""))
-            parts.append(Text(self._content_text))
+            with self._console.use_theme(_MARKDOWN_RENDER_THEME):
+                parts.append(Markdown(
+                    self._content_text,
+                    code_theme=_MARKDOWN_CODE_THEME,
+                    inline_code_theme=_MARKDOWN_CODE_THEME,
+                ))
+        if self._tool_input_progress > 0 and not self._content_text:
+            # Show a subtle progress indicator during tool arg generation
+            dots = "." * (self._tool_input_progress % 4)
+            parts.append(Text(f"  generating tool call{dots}", style="dim"))
         if parts:
             self._stream_live.update(Group(*parts))
 
@@ -284,7 +294,11 @@ class RichRenderer:
             self._content_text += str(event.payload.get("text", ""))
             self._flush_stream_if_due()
             return
-        self._flush_stream_if_due(force=True)
+        if event.type == "tool_input_delta":
+            # Keep the Live widget alive during tool argument generation
+            self._tool_input_progress = self._tool_input_progress + 1
+            self._flush_stream_if_due()
+            return
         if event.type == "tool_call_start":
             self.show_tool_call(event.payload["tool_name"], event.payload.get("tool_args", {}))
         elif event.type == "tool_call_result":
@@ -293,11 +307,16 @@ class RichRenderer:
             self.show_status(str(event.payload.get("message", "")))
 
     def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
+        # Do one final flush to ensure the Live widget shows complete content
+        self._update_stream_display()
+
         if self._stream_live is not None:
             self._stream_live.__exit__(None, None, None)
             self._stream_live = None
+
         self._thinking_text = ""
         self._content_text = ""
+        self._tool_input_progress = 0
         self._stream_turn_id = None
 
 

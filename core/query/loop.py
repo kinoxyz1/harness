@@ -450,20 +450,22 @@ class QueryLoop:
             if isinstance(prompt_tokens, int):
                 session_state.compact_state["last_prompt_tokens"] = prompt_tokens
 
-            # 显示 thinking 过程（蓝框）
-            # 流式模式已通过 Live 实时展示 thinking，不再重复显示 Panel
-            if not state.current_thinking_visible and renderer and getattr(model_resp, "reasoning", "").strip():
-                renderer.show_thinking("思考过程", model_resp.reasoning)
-
             state.last_model_response = model_resp
             store.append(model_resp.to_message())
 
-            # ── 分支 0：输出被截断（finish=max_tokens）且无工具调用 → 继续循环 ──
+            # ── 分支 0：输出被截断（finish=max_tokens）→ 继续循环 ──
             # 模型的回复被 max_tokens 截断，说明还有内容要输出。
             # 注入一条 user 消息让模型继续，而不是返回不完整的文本。
-            if getattr(model_resp, "is_truncated", False) and not model_resp.tool_calls:
-                store.append({"role": "user", "content": "你的回复被截断了，请继续完成。"})
-                continue
+            # 同时处理截断发生在 tool call 参数中间的情况：tool_calls 存在
+            # 但 args 为空/无效，应该走继续逻辑而非执行空参数的工具。
+            if getattr(model_resp, "is_truncated", False):
+                has_valid_tool_call = any(
+                    tc.get("args") or tc.get("name")
+                    for tc in (model_resp.tool_calls or [])
+                )
+                if not has_valid_tool_call:
+                    store.append({"role": "user", "content": "你的回复被截断了，请继续完成。"})
+                    continue
 
             # ── 分支 A：已达上限但模型仍想调工具 → 强制终止 ─────────
             if model_resp.tool_calls and state.stop_reason == "max_turns":
@@ -481,8 +483,9 @@ class QueryLoop:
                 parsed_calls = _parse_tool_calls(model_resp.tool_calls)
 
                 # UI 展示：如果有文字就显示文字，否则显示工具操作摘要
+                # 流式模式已通过 Live 实时展示文本，不再重复显示
                 if renderer:
-                    if model_resp.content.strip():
+                    if model_resp.content.strip() and not state.current_content_visible:
                         renderer.show_assistant(model_resp.content)
                     else:
                         fallback_status = _build_tool_fallback_status(parsed_calls)

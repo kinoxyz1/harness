@@ -299,3 +299,157 @@ class TestClientCall:
 
         release.set()
         assert mock_client.close.called
+
+
+class TestClientStream:
+    def test_stream_emits_tool_call_ready_for_tool_use_block(self):
+        """tool_use content block with input already available at content_block_start."""
+        stream_ctx = MagicMock()
+        tool_block = MagicMock(type="tool_use", id="toolu_1", input={"skill": "weather"})
+        tool_block.name = "skill"
+        stream_ctx.__enter__.return_value = iter(
+            [
+                MagicMock(type="message_start", message=MagicMock(usage=MagicMock(input_tokens=10, output_tokens=0))),
+                MagicMock(type="content_block_start", index=0, content_block=tool_block),
+                MagicMock(type="content_block_stop", index=0),
+                MagicMock(type="message_delta", delta=MagicMock(stop_reason="tool_use"), usage=MagicMock(output_tokens=5)),
+                MagicMock(type="message_stop"),
+            ]
+        )
+        stream_ctx.__exit__.return_value = False
+
+        client = AnthropicClient.__new__(AnthropicClient)
+        client._client = MagicMock()
+        client._adaptive_supported = True
+        client._client.messages.stream.return_value = stream_ctx
+
+        with patch("core.llm.anthropic_client.normalize_messages", return_value=("", [{"role": "user", "content": "hi"}])):
+            events = list(client.stream([{"role": "user", "content": "hi"}], turn_id="turn-1"))
+
+        assert [event.type for event in events] == [
+            "response_start",
+            "tool_call_ready",
+            "response_completed",
+        ]
+        assert events[1].payload["tool_call"] == {
+            "id": "toolu_1",
+            "name": "skill",
+            "args": {"skill": "weather"},
+        }
+        assert events[-1].payload["finish_reason"] == "tool_use"
+
+    def test_stream_assembles_tool_input_via_json_deltas(self):
+        """tool_use input arrives incrementally via input_json_delta events."""
+        stream_ctx = MagicMock()
+        tool_block = MagicMock(type="tool_use", id="toolu_2", input="")
+        tool_block.name = "bash"
+        stream_ctx.__enter__.return_value = iter(
+            [
+                MagicMock(type="message_start", message=MagicMock(usage=MagicMock(input_tokens=10, output_tokens=0))),
+                MagicMock(type="content_block_start", index=0, content_block=tool_block),
+                MagicMock(
+                    type="content_block_delta",
+                    index=0,
+                    delta=MagicMock(type="input_json_delta", partial_json='{"comma'),
+                ),
+                MagicMock(
+                    type="content_block_delta",
+                    index=0,
+                    delta=MagicMock(type="input_json_delta", partial_json='nd": "pwd"}'),
+                ),
+                MagicMock(type="content_block_stop", index=0),
+                MagicMock(type="message_delta", delta=MagicMock(stop_reason="tool_use"), usage=MagicMock(output_tokens=5)),
+                MagicMock(type="message_stop"),
+            ]
+        )
+        stream_ctx.__exit__.return_value = False
+
+        client = AnthropicClient.__new__(AnthropicClient)
+        client._client = MagicMock()
+        client._adaptive_supported = True
+        client._client.messages.stream.return_value = stream_ctx
+
+        with patch("core.llm.anthropic_client.normalize_messages", return_value=("", [{"role": "user", "content": "hi"}])):
+            events = list(client.stream([{"role": "user", "content": "hi"}], turn_id="turn-2"))
+
+        assert [event.type for event in events] == [
+            "response_start",
+            "tool_input_delta",
+            "tool_input_delta",
+            "tool_call_ready",
+            "response_completed",
+        ]
+        assert events[3].payload["tool_call"] == {
+            "id": "toolu_2",
+            "name": "bash",
+            "args": {"command": "pwd"},
+        }
+
+    def test_stream_tool_use_with_empty_dict_input_uses_json_deltas(self):
+        """SDK sends input={} at content_block_start but real args arrive via input_json_delta."""
+        stream_ctx = MagicMock()
+        tool_block = MagicMock(type="tool_use", id="toolu_3", input={})
+        tool_block.name = "bash"
+        stream_ctx.__enter__.return_value = iter(
+            [
+                MagicMock(type="message_start", message=MagicMock(usage=MagicMock(input_tokens=10, output_tokens=0))),
+                MagicMock(type="content_block_start", index=0, content_block=tool_block),
+                MagicMock(
+                    type="content_block_delta",
+                    index=0,
+                    delta=MagicMock(type="input_json_delta", partial_json='{"command": "ls"}'),
+                ),
+                MagicMock(type="content_block_stop", index=0),
+                MagicMock(type="message_delta", delta=MagicMock(stop_reason="tool_use"), usage=MagicMock(output_tokens=5)),
+                MagicMock(type="message_stop"),
+            ]
+        )
+        stream_ctx.__exit__.return_value = False
+
+        client = AnthropicClient.__new__(AnthropicClient)
+        client._client = MagicMock()
+        client._adaptive_supported = True
+        client._client.messages.stream.return_value = stream_ctx
+
+        with patch("core.llm.anthropic_client.normalize_messages", return_value=("", [{"role": "user", "content": "hi"}])):
+            events = list(client.stream([{"role": "user", "content": "hi"}], turn_id="turn-4"))
+
+        assert events[1].type == "tool_input_delta"
+        assert events[2].type == "tool_call_ready"
+        assert events[2].payload["tool_call"]["args"] == {"command": "ls"}
+
+    def test_stream_text_and_thinking_deltas(self):
+        """Stream emits thinking_delta and content_delta for normal text blocks."""
+        stream_ctx = MagicMock()
+        stream_ctx.__enter__.return_value = iter(
+            [
+                MagicMock(type="message_start", message=MagicMock(usage=MagicMock(input_tokens=10, output_tokens=0))),
+                MagicMock(type="content_block_start", index=0, content_block=MagicMock(type="thinking")),
+                MagicMock(type="content_block_delta", index=0, delta=MagicMock(type="thinking_delta", thinking="hmm")),
+                MagicMock(type="content_block_stop", index=0),
+                MagicMock(type="content_block_start", index=1, content_block=MagicMock(type="text")),
+                MagicMock(type="content_block_delta", index=1, delta=MagicMock(type="text_delta", text="hello")),
+                MagicMock(type="content_block_stop", index=1),
+                MagicMock(type="message_delta", delta=MagicMock(stop_reason="end_turn"), usage=MagicMock(output_tokens=5)),
+                MagicMock(type="message_stop"),
+            ]
+        )
+        stream_ctx.__exit__.return_value = False
+
+        client = AnthropicClient.__new__(AnthropicClient)
+        client._client = MagicMock()
+        client._adaptive_supported = True
+        client._client.messages.stream.return_value = stream_ctx
+
+        with patch("core.llm.anthropic_client.normalize_messages", return_value=("", [{"role": "user", "content": "hi"}])):
+            events = list(client.stream([{"role": "user", "content": "hi"}], turn_id="turn-3"))
+
+        assert [event.type for event in events] == [
+            "response_start",
+            "thinking_delta",
+            "content_delta",
+            "response_completed",
+        ]
+        assert events[1].payload["text"] == "hmm"
+        assert events[2].payload["text"] == "hello"
+        assert events[-1].payload["finish_reason"] == "end_turn"

@@ -43,7 +43,7 @@ def test_matching_skill_injects_reminder():
     assert "skill_relevance" in messages[0]["content"]
     assert "阻塞要求" not in messages[0]["content"]
     assert "必须先调用 skill 工具" not in messages[0]["content"]
-    assert "可优先考虑调用 skill 工具" in messages[0]["content"]
+    assert "可能与当前任务相关" in messages[0]["content"]
 
 
 def test_already_invoked_skill_is_skipped():

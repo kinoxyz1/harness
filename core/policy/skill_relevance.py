@@ -121,8 +121,7 @@ class SkillRelevancePolicy:
 
         content = (
             "<system-reminder type=\"skill_relevance\">\n"
-            "以下 skill 与当前任务高度相关但尚未激活。\n"
-            "可优先考虑调用 skill 工具加载匹配的 skill，再根据展开后的指令决定下一步。\n\n"
+            "以下 skill 可能与当前任务相关，供参考：\n\n"
             + "\n".join(lines)
             + "\n</system-reminder>"
         )

@@ -423,7 +423,7 @@ class ToolExecutorRuntime:
         shown_trace_progress = False
         shown_compact_status = False
         while thread.is_alive():
-            thread.join(timeout=1.0)
+            thread.join(timeout=0.2)
             if thread.is_alive():
                 elapsed = int(time.time() - start)
                 if elapsed >= 2:

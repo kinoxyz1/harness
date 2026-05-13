@@ -38,7 +38,7 @@ MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
 THINKING_MODE: str = os.environ.get("LLM_THINKING_MODE", "enabled")
 
 # enabled 模式下的 thinking token 预算上限，auto 模式下由模型自行决定
-THINKING_BUDGET: int = int(os.environ.get("LLM_THINKING_BUDGET", "254"))
+THINKING_BUDGET: int = int(os.environ.get("LLM_THINKING_BUDGET", "8192"))
 
 # 是否在终端显示 thinking 内容（蓝框中的思考过程）
 SHOW_THINKING: bool = os.environ.get("LLM_SHOW_THINKING", "true").lower() in ("true", "1", "yes")
@@ -63,7 +63,7 @@ MAX_OUTPUT_CHARS: int = int(os.environ.get("MAX_OUTPUT_CHARS", "100000"))
 # 上下文窗口大小（token 数），决定水位线阈值。不同模型上下文窗口不同：
 # Claude Sonnet/Opus: 200000, Kimi K2.5: 131072, GLM: 128000
 # 必须与实际模型匹配，否则上下文管理阈值会错位
-CONTEXT_WINDOW_TOKENS: int = int(os.environ.get("CONTEXT_WINDOW_TOKENS", "2000000"))
+CONTEXT_WINDOW_TOKENS: int = int(os.environ.get("CONTEXT_WINDOW_TOKENS", "131072"))
 
 # ─── Skill 匹配配置 ────────────────────────────────────────────────────────
 

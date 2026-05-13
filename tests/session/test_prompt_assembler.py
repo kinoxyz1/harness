@@ -115,14 +115,15 @@ def test_stable_cache_key_includes_prompt_digest(tmp_path: Path) -> None:
     assert len(parts[2]) == 12  # sha256 digest truncated to 12 chars
 
 
-def test_build_stable_includes_stronger_todo_guidance(tmp_path: Path) -> None:
+def test_build_stable_scopes_skill_gate_to_preplan_only(tmp_path: Path) -> None:
     state = make_state(tmp_path)
     assembler = PromptAssembler()
 
     stable = assembler.build_stable(state, project_root=str(tmp_path))
 
     assert "复杂多步骤任务必须先调用 task_plan" in stable
-    assert "在 TaskState 建立前，不要先加载 skill" in stable
+    assert "只有当前请求已进入 task planning 阶段时，才不要先加载 skill" in stable
+    assert "如果当前请求不需要 task_plan，且任务匹配某个 skill，可以直接调用 skill 工具加载它" in stable
 
 
 def test_stable_cache_key_changes_when_system_prompt_text_changes(
@@ -599,7 +600,8 @@ def test_build_stable_includes_stronger_todo_guidance(tmp_path: Path) -> None:
     stable = assembler.build_stable(state, project_root=str(tmp_path))
 
     assert "复杂多步骤任务必须先调用 task_plan" in stable
-    assert "在 TaskState 建立前，不要先加载 skill" in stable
+    assert "只有当前请求已进入 task planning 阶段时，才不要先加载 skill" in stable
+    assert "如果当前请求不需要 task_plan，且任务匹配某个 skill，可以直接调用 skill 工具加载它" in stable
 
 
 def test_stable_cache_key_changes_when_system_prompt_text_changes(

@@ -33,13 +33,14 @@ fresh_subagent 任务用 task_execute 执行。
 选择 execution_mode 的原则：评估每个任务的复杂度和上下文隔离需求。
 适合 fresh_subagent 的任务特征：需要多轮探索/分析、能独立完成不依赖主上下文、复杂度足以拆分为独立子流程。
 适合 local 的任务特征：简单直接的操作、需要操作当前项目上下文、单步即可完成。
-在 TaskState 建立前，不要先加载 skill、不要派发 subagent、不要开始执行；只允许为规划读取少量只读信息。
+只有当前请求已进入 task planning 阶段时，才不要先加载 skill、不要派发 subagent、不要开始执行；此时只允许为规划读取少量只读信息。
 优先使用工具而非文字描述。
 
 ## Skills
 
 系统提示词中包含 <available-skills> 目录。
-只有在 TaskState 已建立且当前任务明确需要时，才调用 skill 工具加载对应 skill。
+如果当前请求不需要 task_plan，且任务匹配某个 skill，可以直接调用 skill 工具加载它。
+如果当前请求已进入 task planning 阶段，则先完成 task_plan，再在当前任务明确需要时调用 skill 工具加载对应 skill。
 """
 
 # 用户定制文件的加载顺序（后面的覆盖前面的）
