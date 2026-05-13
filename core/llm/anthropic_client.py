@@ -7,10 +7,12 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 import sys
 import threading
 import time
 from typing import Any
+from uuid import uuid4
 
 from rich.console import Console
 
@@ -26,6 +28,7 @@ from .client import ContextWindowExceededError, ModelRequestOptions, RequestCanc
 from .factory import create_llm_client
 from .protocol import normalize_messages
 from ..shared.run_options import RunDisplayOptions
+from ..shared.stream_events import StreamEvent, make_event
 
 _console = Console()
 
@@ -179,7 +182,7 @@ class AnthropicClient:
             messages: 对话消息列表。
             system: 外部传入的系统提示（来自 ModelInputView.system）。
             tools: 可用工具 schema 列表。
-            stream: 是否流式输出（当前未实现）。
+            stream: 是否流式输出（使用 stream() 方法代替）。
             display: 显示选项，控制是否打印计时和 token 统计。
 
         Returns:
@@ -292,6 +295,79 @@ class AnthropicClient:
             )
 
         return llm_resp
+
+    def stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system: str = "",
+        tools: list[dict[str, Any]] | None = None,
+        request_options: ModelRequestOptions | None = None,
+        turn_id: str | None = None,
+    ) -> Iterator[StreamEvent]:
+        request_options = request_options or ModelRequestOptions()
+        turn_id = turn_id or uuid4().hex
+
+        normalized_system, api_messages = normalize_messages(messages)
+        full_system = "\n\n".join(part for part in [system, normalized_system] if part)
+        api_messages = _sanitize_surrogates(api_messages)
+        full_system = _sanitize_surrogates(full_system)
+
+        params = {
+            "model": MODEL,
+            "system": full_system,
+            "messages": api_messages,
+            "max_tokens": request_options.max_output_tokens or MAX_TOKENS,
+        }
+        if tools:
+            params["tools"] = tools
+        if request_options.thinking_mode != "disabled":
+            self._apply_thinking(params)
+
+        sequence = 0
+
+        def emit(type: str, payload: dict[str, Any] | None = None):
+            nonlocal sequence
+            sequence += 1
+            return make_event(type, turn_id, sequence, "model", "live", payload)
+
+        try:
+            with self._client.messages.stream(**params) as stream:
+                input_tokens = 0
+                output_tokens = 0
+                finish_reason = "end_turn"
+                reasoning_signature = ""
+                yield emit("response_start")
+                for sdk_event in stream:
+                    if request_options.cancel_check and request_options.cancel_check():
+                        self._reset_client()
+                        raise RequestCancelledError("request cancelled by user")
+                    if sdk_event.type == "message_start":
+                        input_tokens = int(getattr(sdk_event.message.usage, "input_tokens", 0))
+                    elif sdk_event.type == "content_block_delta":
+                        delta = sdk_event.delta
+                        if getattr(delta, "type", "") == "thinking_delta":
+                            yield emit("thinking_delta", {"text": getattr(delta, "thinking", "")})
+                        elif getattr(delta, "type", "") == "text_delta":
+                            yield emit("content_delta", {"text": getattr(delta, "text", "")})
+                    elif sdk_event.type == "message_delta":
+                        finish_reason = getattr(sdk_event.delta, "stop_reason", finish_reason) or finish_reason
+                        output_tokens = int(getattr(sdk_event.usage, "output_tokens", output_tokens))
+                    elif sdk_event.type == "message_stop":
+                        yield emit(
+                            "response_completed",
+                            {
+                                "finish_reason": finish_reason,
+                                "prompt_tokens": input_tokens,
+                                "completion_tokens": output_tokens,
+                                "reasoning_signature": reasoning_signature,
+                            },
+                        )
+        except RequestCancelledError:
+            raise
+        except Exception as err:
+            self._raise_context_window_exceeded_if_needed(err)
+            raise
 
 
 def _parse_response(response: Any) -> LLMResponse:

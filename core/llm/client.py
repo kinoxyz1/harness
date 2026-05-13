@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from typing import Callable
@@ -83,3 +84,25 @@ class ModelGateway:
             reasoning=response.reasoning or "",
             reasoning_signature=response.reasoning_signature or "",
         )
+
+    def stream_once(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system: str = "",
+        tools: list[dict[str, Any]] | None,
+        request_options: ModelRequestOptions | None = None,
+        turn_id: str,
+    ) -> Iterator:
+        if self._client is None:
+            raise RuntimeError("No LLM client configured")
+        if hasattr(self._client, "stream"):
+            yield from self._client.stream(
+                messages,
+                system=system,
+                tools=tools,
+                request_options=request_options,
+                turn_id=turn_id,
+            )
+            return
+        raise RuntimeError("Configured client does not support stream()")
