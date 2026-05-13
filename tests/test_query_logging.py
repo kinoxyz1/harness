@@ -326,3 +326,94 @@ def test_query_loop_returns_api_error_when_model_request_fails() -> None:
     assert result.stop_reason == StopReason.API_ERROR
     assert result.success is False
     assert "504 Gateway Time-out" in result.final_output
+
+
+from core.shared.stream_events import make_event
+
+
+class FakeStreamingRenderer(FakeRenderer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.begin_calls: list[str] = []
+        self.event_types: list[str] = []
+        self.end_calls: list[str] = []
+
+    def begin_stream(self, turn_id: str, meta: dict[str, object]) -> None:
+        self.begin_calls.append(turn_id)
+
+    def consume_event(self, event) -> None:
+        self.event_types.append(event.type)
+
+    def end_stream(self, turn_id: str, result_meta: dict[str, object]) -> None:
+        self.end_calls.append(turn_id)
+
+
+class FakeStreamingGateway:
+    def stream_once(self, messages, *, system="", tools=None, request_options=None, turn_id: str):
+        yield make_event("response_start", turn_id, 1, "model", "live")
+        yield make_event("thinking_delta", turn_id, 2, "model", "live", {"text": "先分析"})
+        yield make_event("content_delta", turn_id, 3, "model", "live", {"text": "最终回答"})
+        yield make_event(
+            "response_completed",
+            turn_id,
+            4,
+            "model",
+            "live",
+            {
+                "finish_reason": "end_turn",
+                "prompt_tokens": 123,
+                "completion_tokens": 45,
+                "reasoning_signature": "sig_1",
+            },
+        )
+
+
+def test_query_loop_streams_main_agent_when_enabled(monkeypatch) -> None:
+    monkeypatch.setattr("core.query.loop.STREAMING_ENABLED", True)
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+    renderer = FakeStreamingRenderer()
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=FakeStreamingGateway(),
+        tool_runtime=object(),
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        renderer=renderer,
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    assert renderer.begin_calls and renderer.end_calls
+    assert renderer.event_types == ["response_start", "thinking_delta", "content_delta", "response_completed"]
+    assert session_state.conversation_messages[-1]["role"] == "assistant"
+    assert session_state.conversation_messages[-1]["content"] == "最终回答"
+
+
+def test_query_loop_uses_batch_path_when_streaming_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("core.query.loop.STREAMING_ENABLED", False)
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=FakeModelGateway(),
+        tool_runtime=object(),
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        renderer=FakeRenderer(),
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED

@@ -571,3 +571,73 @@ def test_query_loop_renders_full_plan_again_after_clear_without_completion_snaps
     assert result.stop_reason == StopReason.COMPLETED
     assert len(renderer.progress_calls) == 2
     assert renderer.current_todo_calls == []
+
+
+def test_streaming_tool_turn_keeps_fallback_text_out_of_transcript(monkeypatch) -> None:
+    from core.shared.stream_events import make_event
+
+    monkeypatch.setattr("core.query.loop.STREAMING_ENABLED", True)
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self._call = 0
+
+        def stream_once(self, messages, *, system="", tools=None, request_options=None, turn_id: str):
+            self._call += 1
+            seq = (self._call - 1) * 3
+            if self._call == 1:
+                yield make_event("response_start", turn_id, seq + 1, "model", "live")
+                yield make_event(
+                    "tool_call_ready",
+                    turn_id,
+                    seq + 2,
+                    "model",
+                    "live",
+                    {"tool_call": {"id": "toolu_1", "name": "read_file", "args": {"path": "README.md"}}},
+                )
+                yield make_event(
+                    "response_completed",
+                    turn_id,
+                    seq + 3,
+                    "model",
+                    "live",
+                    {"finish_reason": "tool_use", "prompt_tokens": 10, "completion_tokens": 5},
+                )
+            else:
+                yield make_event("response_start", turn_id, seq + 1, "model", "live")
+                yield make_event("content_delta", turn_id, seq + 2, "model", "live", {"text": "完成"})
+                yield make_event(
+                    "response_completed",
+                    turn_id,
+                    seq + 3,
+                    "model",
+                    "live",
+                    {"finish_reason": "end_turn", "prompt_tokens": 10, "completion_tokens": 5},
+                )
+
+    renderer = FakeRenderer()
+    runtime = FakeToolRuntime([_success_batch("read_file")])
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=Gateway(),
+        tool_runtime=runtime,
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        renderer=renderer,
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    assert all(
+        msg.get("content") != "先读取 README.md。"
+        for msg in session_state.conversation_messages
+        if msg.get("role") == "assistant"
+    )

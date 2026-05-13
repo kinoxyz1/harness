@@ -22,7 +22,11 @@ from core.query.state import RunState
 from core.session.state import TodoItem
 from core.tools.context import SessionUpdateKind
 from core.tools.runtime import ToolBatchResult, ToolCall
+from uuid import uuid4
+
 from core.llm.client import ContextWindowExceededError, ModelRequestOptions, RequestCancelledError
+from core.shared.config import PERSIST_PARTIAL_STREAM_OUTPUT, STREAMING_ENABLED
+from core.shared.stream_events import StreamAccumulator
 
 
 # ─── 工具调用解析 ────────────────────────────────────────────────────────────
@@ -314,56 +318,134 @@ class QueryLoop:
             request_options = ModelRequestOptions(
                 cancel_check=(lambda: tool_context.cancelled) if tool_context is not None else None
             )
-            try:
+
+            if STREAMING_ENABLED and hasattr(model_gateway, "stream_once"):
+                # Streaming path
+                turn_id = uuid4().hex
+                accumulator = StreamAccumulator()
+                state.current_turn_id = turn_id
+                state.current_response_streaming = True
+                if renderer is not None and hasattr(renderer, "begin_stream"):
+                    renderer.begin_stream(turn_id, {"source": "main_loop"})
                 try:
-                    model_resp = model_gateway.call_once(
+                    for event in model_gateway.stream_once(
                         view.messages,
                         system=view.system,
                         tools=active_tools,
                         request_options=request_options,
+                        turn_id=turn_id,
+                    ):
+                        state.last_stream_sequence = event.sequence
+                        state.stream_source_mode = event.source_mode
+                        if event.type == "thinking_delta":
+                            state.current_thinking_visible = True
+                        elif event.type == "content_delta":
+                            state.current_content_visible = True
+                        accumulator.consume(event)
+                        if renderer is not None and hasattr(renderer, "consume_event"):
+                            renderer.consume_event(event)
+                    model_resp = accumulator.finalize()
+                except RequestCancelledError:
+                    if renderer is not None and hasattr(renderer, "show_status"):
+                        renderer.show_status("已取消当前运行。")
+                    return QueryResult(
+                        final_output="已取消当前运行。",
+                        stop_reason=StopReason.ABORTED,
+                        success=False,
+                        turns_used=state.turn_count,
+                        tool_calls_executed=state.tool_calls_executed,
+                        files_modified=state.files_modified,
                     )
-                except TypeError as exc:
-                    if "request_options" not in str(exc):
+                except ContextWindowExceededError:
+                    if state.reactive_recovery_attempted:
                         raise
-                    model_resp = model_gateway.call_once(
-                        view.messages,
-                        system=view.system,
-                        tools=active_tools,
+                    governor.reactive_recover(
+                        session_state=session_state,
+                        run_state=state,
+                        store=store,
+                        stable_system=stable_system,
+                        stable_tools=stable_tools,
+                        runtime_blocks=runtime_blocks,
+                        overlay_blocks=overlay_blocks,
                     )
-            except ContextWindowExceededError:
-                if state.reactive_recovery_attempted:
-                    raise
-                governor.reactive_recover(
-                    session_state=session_state,
-                    run_state=state,
-                    store=store,
-                    stable_system=stable_system,
-                    stable_tools=stable_tools,
-                    runtime_blocks=runtime_blocks,
-                    overlay_blocks=overlay_blocks,
-                )
-                state.reactive_recovery_attempted = True
-                continue
-            except RequestCancelledError:
-                return QueryResult(
-                    final_output="已取消当前运行。",
-                    stop_reason=StopReason.ABORTED,
-                    success=False,
-                    turns_used=state.turn_count,
-                    tool_calls_executed=state.tool_calls_executed,
-                    files_modified=state.files_modified,
-                )
-            except Exception as exc:
-                if renderer is not None and hasattr(renderer, "show_error"):
-                    renderer.show_error(f"模型请求失败: {exc}")
-                return QueryResult(
-                    final_output=f"模型请求失败：{exc}",
-                    stop_reason=StopReason.API_ERROR,
-                    success=False,
-                    turns_used=state.turn_count,
-                    tool_calls_executed=state.tool_calls_executed,
-                    files_modified=state.files_modified,
-                )
+                    state.reactive_recovery_attempted = True
+                    state.current_response_streaming = False
+                    if renderer is not None and hasattr(renderer, "end_stream"):
+                        renderer.end_stream(turn_id, {"source_mode": state.stream_source_mode})
+                    continue
+                except Exception as exc:
+                    snapshot = accumulator.snapshot()
+                    if PERSIST_PARTIAL_STREAM_OUTPUT and snapshot["content"]:
+                        store.append({"role": "assistant", "content": snapshot["content"], "incomplete": True})
+                    if renderer is not None and hasattr(renderer, "show_error"):
+                        renderer.show_error(f"模型请求失败: {exc}")
+                    state.current_response_streaming = False
+                    if renderer is not None and hasattr(renderer, "end_stream"):
+                        renderer.end_stream(turn_id, {"source_mode": state.stream_source_mode})
+                    return QueryResult(
+                        final_output=f"模型请求失败：{exc}",
+                        stop_reason=StopReason.API_ERROR,
+                        success=False,
+                        turns_used=state.turn_count,
+                        tool_calls_executed=state.tool_calls_executed,
+                        files_modified=state.files_modified,
+                    )
+                finally:
+                    state.current_response_streaming = False
+                    if renderer is not None and hasattr(renderer, "end_stream"):
+                        renderer.end_stream(turn_id, {"source_mode": state.stream_source_mode})
+            else:
+                # Batch (non-streaming) path
+                try:
+                    try:
+                        model_resp = model_gateway.call_once(
+                            view.messages,
+                            system=view.system,
+                            tools=active_tools,
+                            request_options=request_options,
+                        )
+                    except TypeError as exc:
+                        if "request_options" not in str(exc):
+                            raise
+                        model_resp = model_gateway.call_once(
+                            view.messages,
+                            system=view.system,
+                            tools=active_tools,
+                        )
+                except ContextWindowExceededError:
+                    if state.reactive_recovery_attempted:
+                        raise
+                    governor.reactive_recover(
+                        session_state=session_state,
+                        run_state=state,
+                        store=store,
+                        stable_system=stable_system,
+                        stable_tools=stable_tools,
+                        runtime_blocks=runtime_blocks,
+                        overlay_blocks=overlay_blocks,
+                    )
+                    state.reactive_recovery_attempted = True
+                    continue
+                except RequestCancelledError:
+                    return QueryResult(
+                        final_output="已取消当前运行。",
+                        stop_reason=StopReason.ABORTED,
+                        success=False,
+                        turns_used=state.turn_count,
+                        tool_calls_executed=state.tool_calls_executed,
+                        files_modified=state.files_modified,
+                    )
+                except Exception as exc:
+                    if renderer is not None and hasattr(renderer, "show_error"):
+                        renderer.show_error(f"模型请求失败: {exc}")
+                    return QueryResult(
+                        final_output=f"模型请求失败：{exc}",
+                        stop_reason=StopReason.API_ERROR,
+                        success=False,
+                        turns_used=state.turn_count,
+                        tool_calls_executed=state.tool_calls_executed,
+                        files_modified=state.files_modified,
+                    )
             prompt_tokens = getattr(model_resp, "prompt_tokens", None)
             if isinstance(prompt_tokens, int):
                 session_state.compact_state["last_prompt_tokens"] = prompt_tokens

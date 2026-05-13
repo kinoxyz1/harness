@@ -33,3 +33,11 @@ class RunState:
     task_planning_required: bool = False
     task_planning_reason: str | None = None
     task_plan_invoked_this_turn: bool = False
+
+    # ── 流式输出状态 ─────────────────────────────────────────────────────
+    current_turn_id: str | None = None
+    current_response_streaming: bool = False
+    current_thinking_visible: bool = False
+    current_content_visible: bool = False
+    last_stream_sequence: int = 0
+    stream_source_mode: str | None = None
