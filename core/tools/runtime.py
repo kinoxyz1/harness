@@ -59,11 +59,14 @@ class ToolExecutorRuntime:
         context: ToolUseContext,
         display: RunDisplayOptions | None = None,
         renderer=None,
+        event_sink=None,
     ):
         self._registry = registry
         self._context = context
         self._display = display or RunDisplayOptions()
         self._renderer = renderer
+        self._event_sink = event_sink
+        self._active_run_state = None
 
     def _trace_enabled(self) -> bool:
         return (not self._display.quiet) and self._display.runtime_trace == "debug"
@@ -73,7 +76,40 @@ class ToolExecutorRuntime:
             return True
         return self._display.runtime_trace == "debug"
 
+    def _emit_tool_event(
+        self,
+        type: str,
+        *,
+        tool_name: str,
+        tool_args=None,
+        content: str = "",
+        source_mode: str = "live",
+    ) -> None:
+        if self._event_sink is None:
+            return
+        turn_id = getattr(self._active_run_state, "current_turn_id", None) or "tool-turn"
+        sequence = getattr(self._active_run_state, "last_stream_sequence", 0) + 1
+        if self._active_run_state is not None:
+            self._active_run_state.last_stream_sequence = sequence
+        from core.shared.stream_events import make_event
+
+        self._event_sink(
+            make_event(
+                type=type,
+                turn_id=turn_id,
+                sequence=sequence,
+                origin="tool",
+                source_mode=source_mode,
+                payload={
+                    "tool_name": tool_name,
+                    "tool_args": dict(tool_args or {}),
+                    "content": content,
+                },
+            )
+        )
+
     def _render_tool_call(self, call: ToolCall) -> None:
+        self._emit_tool_event("tool_call_start", tool_name=call.name, tool_args=call.args)
         if self._renderer is None or self._display.quiet:
             return
         if not self._should_render_generic_tool_event(call.name):
@@ -81,6 +117,10 @@ class ToolExecutorRuntime:
         self._renderer.show_tool_call(call.name, call.args)
 
     def _render_tool_result(self, call: ToolCall, outcome: ToolInvocationOutcome) -> None:
+        preview = self._first_content(self._truncate_first_message(outcome))
+        self._emit_tool_event(
+            "tool_call_result", tool_name=call.name, tool_args=call.args, content=preview
+        )
         if self._renderer is None or self._display.quiet:
             return
         if not self._should_render_generic_tool_event(call.name):
@@ -96,6 +136,20 @@ class ToolExecutorRuntime:
         apply_run_update,
     ) -> ToolBatchResult:
         """接收一批 tool_call，分批执行，返回有序结果。"""
+        self._active_run_state = run_state
+        try:
+            return self._execute_batch_inner(tool_calls, run_state=run_state, apply_session_update=apply_session_update, apply_run_update=apply_run_update)
+        finally:
+            self._active_run_state = None
+
+    def _execute_batch_inner(
+        self,
+        tool_calls: list[ToolCall],
+        *,
+        run_state,
+        apply_session_update,
+        apply_run_update,
+    ) -> ToolBatchResult:
         if not tool_calls:
             return ToolBatchResult(
                 messages=[],
