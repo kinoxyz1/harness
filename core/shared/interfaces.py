@@ -86,3 +86,15 @@ class Renderer(Protocol):
         """显示状态信息（灰色 dim）。"""
         ...
 
+    def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
+        """开始流式输出会话。"""
+        ...
+
+    def consume_event(self, event: Any) -> None:
+        """消费流式事件。"""
+        ...
+
+    def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
+        """结束流式输出会话。"""
+        ...
+

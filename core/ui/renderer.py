@@ -1,6 +1,7 @@
 """显示渲染实现。"""
 from __future__ import annotations
 
+import time
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -14,10 +15,13 @@ from rich.theme import Theme
 from ..shared.interfaces import Renderer
 from ..shared.config import (
     SHOW_THINKING,
+    STREAMING_RENDER_FLUSH_MS,
+    STREAMING_THINKING_ENABLED,
     UI_MARKDOWN_CODE_BLOCK_STYLE,
     UI_MARKDOWN_CODE_THEME,
     UI_MARKDOWN_INLINE_CODE_STYLE,
 )
+from ..shared.stream_events import StreamEvent
 
 
 _MARKDOWN_RENDER_THEME = Theme({
@@ -151,6 +155,10 @@ class RichRenderer:
 
     def __init__(self, console: Console | None = None) -> None:
         self._console = console or Console()
+        self._stream_turn_id: str | None = None
+        self._thinking_buffer: list[str] = []
+        self._content_buffer: list[str] = []
+        self._last_flush_at = time.monotonic()
 
     def show_thinking(self, title: str, reasoning: str) -> None:
         """显示推理/思考过程。"""
@@ -232,6 +240,45 @@ class RichRenderer:
         """显示状态信息（灰色 dim）。"""
         self._console.print(f"[dim]{message}[/dim]")
 
+    def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
+        self._stream_turn_id = turn_id
+        self._thinking_buffer = []
+        self._content_buffer = []
+        self._last_flush_at = time.monotonic()
+
+    def _flush_stream_buffers(self, *, force: bool = False) -> None:
+        elapsed_ms = (time.monotonic() - self._last_flush_at) * 1000
+        if not force and elapsed_ms < STREAMING_RENDER_FLUSH_MS:
+            return
+        if self._thinking_buffer and STREAMING_THINKING_ENABLED:
+            self._console.print(f"[dim]思考 {''.join(self._thinking_buffer)}[/dim]")
+            self._thinking_buffer = []
+        if self._content_buffer:
+            self._console.print(f"回复 {''.join(self._content_buffer)}")
+            self._content_buffer = []
+        self._last_flush_at = time.monotonic()
+
+    def consume_event(self, event: StreamEvent) -> None:
+        if event.type == "thinking_delta":
+            self._thinking_buffer.append(str(event.payload.get("text", "")))
+            self._flush_stream_buffers()
+            return
+        if event.type == "content_delta":
+            self._content_buffer.append(str(event.payload.get("text", "")))
+            self._flush_stream_buffers()
+            return
+        self._flush_stream_buffers(force=True)
+        if event.type == "tool_call_start":
+            self.show_tool_call(event.payload["tool_name"], event.payload.get("tool_args", {}))
+        elif event.type == "tool_call_result":
+            self.show_tool_result(event.payload["tool_name"], event.payload.get("content", ""))
+        elif event.type == "status":
+            self.show_status(str(event.payload.get("message", "")))
+
+    def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
+        self._flush_stream_buffers(force=True)
+        self._stream_turn_id = None
+
 
 class QuietRenderer:
     """静默渲染器。
@@ -267,4 +314,13 @@ class QuietRenderer:
         pass
 
     def show_status(self, message: str) -> None:
+        pass
+
+    def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
+        pass
+
+    def consume_event(self, event) -> None:
+        pass
+
+    def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
         pass

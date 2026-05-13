@@ -96,3 +96,20 @@ TOOL_RESULTS_AGGREGATE_BUDGET: int = int(os.environ.get("TOOL_RESULTS_AGGREGATE_
 
 # 落盘后保留在上下文中的预览字节数
 TOOL_RESULT_PREVIEW_BYTES: int = int(os.environ.get("TOOL_RESULT_PREVIEW_BYTES", "10000"))
+
+# ─── 流式渲染配置 ───────────────────────────────────────────────────────────
+
+# 是否启用流式输出（全局开关）
+STREAMING_ENABLED: bool = os.environ.get("STREAMING_ENABLED", "true").lower() in ("true", "1", "yes")
+
+# 是否启用 thinking 的流式展示
+STREAMING_THINKING_ENABLED: bool = os.environ.get("STREAMING_THINKING_ENABLED", "true").lower() in ("true", "1", "yes")
+
+# 流式渲染的 flush 窗口（毫秒）
+STREAMING_RENDER_FLUSH_MS: int = int(os.environ.get("STREAMING_RENDER_FLUSH_MS", "80"))
+
+# 子代理流式模式：replayed 或 live
+SUBAGENT_STREAMING_MODE: str = os.environ.get("SUBAGENT_STREAMING_MODE", "replayed")
+
+# 是否持久化未完成的流式输出
+PERSIST_PARTIAL_STREAM_OUTPUT: bool = os.environ.get("PERSIST_PARTIAL_STREAM_OUTPUT", "false").lower() in ("true", "1", "yes")
