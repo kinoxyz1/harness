@@ -13,6 +13,7 @@ from core.session.subagent import (
     _preload_required_skills,
     coerce_stop_reason,
 )
+from core.shared.stream_events import make_event
 from core.tasks.models import TaskExecutionMode, TaskPacket
 from core.tools.context import ToolUseContext
 
@@ -112,8 +113,8 @@ def test_subagent_runtime_emits_bridge_events_and_passes_tools(tmp_path) -> None
 
     assert captured["tools"] is not None
     assert events[0]["event"] == "subagent_start"
-    assert events[1]["event"] == "subagent_tool_call"
-    assert events[2]["event"] == "subagent_tool_result"
+    assert events[1]["event"] == "subagent_tool_call_start"
+    assert events[2]["event"] == "subagent_tool_call_result"
     assert events[-1]["event"] == "subagent_done"
     assert all(event["task_id"] == "task-1" for event in events)
     assert result.stop_reason == SubagentStopReason.COMPLETED
@@ -142,3 +143,74 @@ def test_subagent_runtime_keeps_parent_session_state_isolated(tmp_path) -> None:
         )
 
     assert parent_state.todo_state.items == []
+
+
+def test_subagent_bridge_forwards_consume_event_with_subagent_prefix() -> None:
+    from core.session.subagent import SubagentBridgeRenderer
+
+    events = []
+    bridge = SubagentBridgeRenderer(task_id="task-1", agent_type="general", emit=events.append)
+
+    bridge.consume_event(
+        make_event(
+            "content_delta",
+            "turn-child",
+            1,
+            "model",
+            "live",
+            {"text": "子代理输出"},
+        )
+    )
+
+    assert events == [
+        {
+            "event": "subagent_content_delta",
+            "task_id": "task-1",
+            "agent_type": "general",
+            "source_mode": "live",
+            "content": "子代理输出",
+        }
+    ]
+
+
+def test_subagent_bridge_legacy_show_assistant_becomes_replayed_event() -> None:
+    from core.session.subagent import SubagentBridgeRenderer
+
+    events = []
+    bridge = SubagentBridgeRenderer(task_id="task-1", agent_type="general", emit=events.append)
+
+    bridge.show_assistant("完整输出")
+
+    assert events == [
+        {
+            "event": "subagent_content_delta",
+            "task_id": "task-1",
+            "agent_type": "general",
+            "source_mode": "replayed",
+            "content": "完整输出",
+        }
+    ]
+
+
+def test_existing_subagent_runtime_tool_event_name_uses_start_suffix(tmp_path) -> None:
+    parent = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
+    parent.bind_runtime(session_state=SessionState(conversation_messages=[]), skill_registry=None)
+    runtime = SubagentRuntime(parent_context=parent)
+    packet = TaskPacket(task_id="task-1", title="Inspect runtime", directive="Fix runtime", agent_type="general")
+    request = SubagentRequest(task_packet=packet, agent_type=SubagentType.GENERAL)
+    events = []
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            self.state = SessionState(conversation_messages=[])
+            self._renderer = kwargs["renderer"]
+
+        def submit_user_message(self, prompt):
+            self._renderer.show_tool_call("find", {"pattern": "*.py"})
+            self._renderer.show_tool_result("find", "core/tasks/models.py")
+            return QueryResult(final_output="done", stop_reason=StopReason.COMPLETED, success=True, turns_used=1)
+
+    with patch("core.session.subagent.SessionEngine", FakeEngine):
+        runtime.run(request, emit=events.append)
+
+    assert events[1]["event"] == "subagent_tool_call_start"

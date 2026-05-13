@@ -18,6 +18,7 @@ from ..tools import ToolUseContext, registry
 from ..tools.runtime import ToolExecutorRuntime
 from ..tasks.models import TaskPacket
 from ..skills.runtime import build_invoked_skill_record
+from ..shared.stream_events import StreamEvent
 
 
 class SubagentType(str, Enum):
@@ -189,31 +190,77 @@ def _preload_required_skills(engine, parent_context, skill_ids, turn):
 
 
 class SubagentBridgeRenderer:
-    """Bridges subagent tool events to parent via emit callback."""
+    """Bridges subagent tool events to parent via emit callback.
+
+    Supports both consume_event() for live streaming and legacy show_*()
+    for replayed events. Both paths emit through the same emit callback.
+    """
 
     def __init__(self, *, task_id: str, agent_type: str, emit) -> None:
         self._task_id = task_id
         self._agent_type = agent_type
         self._emit = emit
 
-    def _base(self, event: str) -> dict[str, Any]:
-        return {"event": event, "task_id": self._task_id, "agent_type": self._agent_type}
+    def _emit_replayed(self, event: str, *, content: str = "", tool_name: str = "", tool_args=None) -> None:
+        payload: dict[str, Any] = {
+            "event": event,
+            "task_id": self._task_id,
+            "agent_type": self._agent_type,
+            "source_mode": "replayed",
+        }
+        if content:
+            payload["content"] = content
+        if tool_name:
+            payload["tool_name"] = tool_name
+        if tool_args:
+            payload["tool_args"] = dict(tool_args)
+        self._emit(payload)
 
-    def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
-        self._emit({**self._base("subagent_tool_call"), "tool_name": name, "tool_args": args})
-
-    def show_tool_result(self, name: str, output: str) -> None:
-        self._emit({**self._base("subagent_tool_result"), "tool_name": name, "content": output})
-
-    def show_status(self, message: str) -> None:
-        self._emit({**self._base("subagent_status"), "content": message})
-
-    def show_thinking(self, title: str, reasoning: str) -> None:
-        self._emit({**self._base("subagent_thinking"), "title": title, "content": reasoning})
+    def consume_event(self, event: StreamEvent) -> None:
+        mapping = {
+            "thinking_delta": "subagent_thinking_delta",
+            "content_delta": "subagent_content_delta",
+            "tool_call_start": "subagent_tool_call_start",
+            "tool_call_result": "subagent_tool_call_result",
+            "status": "subagent_status",
+        }
+        mapped = mapping.get(event.type)
+        if mapped is None:
+            return
+        payload: dict[str, Any] = {
+            "event": mapped,
+            "task_id": self._task_id,
+            "agent_type": self._agent_type,
+            "source_mode": event.source_mode,
+        }
+        if "text" in event.payload:
+            payload["content"] = event.payload["text"]
+        if "content" in event.payload:
+            payload["content"] = event.payload["content"]
+        if "tool_name" in event.payload:
+            payload["tool_name"] = event.payload["tool_name"]
+        if "tool_args" in event.payload:
+            payload["tool_args"] = dict(event.payload["tool_args"])
+        self._emit(payload)
 
     def show_assistant(self, content: str | None) -> None:
         if content:
-            self._emit({**self._base("subagent_message"), "content": content})
+            self._emit_replayed("subagent_content_delta", content=content)
+
+    def show_thinking(self, title: str, reasoning: str) -> None:
+        self._emit_replayed("subagent_thinking_delta", content=reasoning)
+
+    def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
+        self._emit_replayed("subagent_tool_call_start", tool_name=name, tool_args=args)
+
+    def show_tool_result(self, name: str, output: str) -> None:
+        self._emit_replayed("subagent_tool_call_result", tool_name=name, content=output)
+
+    def show_status(self, message: str) -> None:
+        self._emit_replayed("subagent_status", content=message)
+
+    def show_error(self, message: str) -> None:
+        self._emit_replayed("subagent_error", content=message)
 
     def show_timing(self, elapsed: float, prompt_tokens: int, completion_tokens: int, finish_reason: str) -> None:
         return None
@@ -227,8 +274,11 @@ class SubagentBridgeRenderer:
     def show_completion_summary(self, completed: int, total: int, elapsed: float) -> None:
         return None
 
-    def show_error(self, message: str) -> None:
-        self._emit({**self._base("subagent_error"), "content": message})
+    def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
+        pass
+
+    def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
+        pass
 
 
 class SubagentRuntime:
