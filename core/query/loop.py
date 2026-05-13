@@ -451,7 +451,8 @@ class QueryLoop:
                 session_state.compact_state["last_prompt_tokens"] = prompt_tokens
 
             # 显示 thinking 过程（蓝框）
-            if renderer and getattr(model_resp, "reasoning", "").strip():
+            # 流式模式已通过 Live 实时展示 thinking，不再重复显示 Panel
+            if not state.current_thinking_visible and renderer and getattr(model_resp, "reasoning", "").strip():
                 renderer.show_thinking("思考过程", model_resp.reasoning)
 
             state.last_model_response = model_resp
@@ -541,6 +542,7 @@ class QueryLoop:
                     turns_used=state.turn_count,
                     tool_calls_executed=state.tool_calls_executed,
                     files_modified=state.files_modified,
+                    streaming_displayed=state.current_content_visible,
                 )
 
             # ── 分支 D：模型返回空响应 → 交给 recovery 处理 ────────

@@ -250,7 +250,7 @@ class RichRenderer:
         self._last_flush_at = time.monotonic()
         self._stream_live = Live(
             console=self._console,
-            transient=True,
+            transient=False,
             refresh_per_second=12,
         )
         self._stream_live.__enter__()

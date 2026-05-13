@@ -287,7 +287,7 @@ def handle_input(raw: str, engine: SessionEngine) -> bool:
             console.print(output)
         return True
     result = engine.submit_user_message(text)
-    if result.final_output:
+    if result.final_output and not result.streaming_displayed:
         render_markdown(console, result.final_output)
     return True
 

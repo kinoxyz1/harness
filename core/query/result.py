@@ -22,3 +22,4 @@ class QueryResult:
     tool_calls_executed: int = 0
     files_modified: list[str] = field(default_factory=list)
     usage_delta: dict[str, int] = field(default_factory=dict)
+    streaming_displayed: bool = False
