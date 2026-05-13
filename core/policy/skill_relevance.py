@@ -63,6 +63,8 @@ class SkillRelevancePolicy:
         self._use_llm = SKILL_LLM_MATCH and model_gateway is not None
 
     def before_model_call(self, session_state, run_state) -> list[dict[str, str]]:
+        if run_state.task_planning_required and not session_state.task_state.tasks_by_id:
+            return []
         catalog = session_state.skill_catalog
         if not catalog:
             return []

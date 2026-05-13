@@ -168,6 +168,8 @@ class SessionEngine:
             QueryResult 包含最终输出、停止原因等。
         """
         self.bootstrap()
+        if self._tool_context is not None and hasattr(self._tool_context, "_reset_cancel"):
+            self._tool_context._reset_cancel()
         self._store.append({"role": "user", "content": text})
         return self._query_loop.run(
             session_state=self._state,
@@ -185,3 +187,7 @@ class SessionEngine:
             tools=self._tools,
             renderer=self._renderer,
         )
+
+    def request_cancel(self) -> None:
+        if self._tool_context is not None and hasattr(self._tool_context, "_cancel"):
+            self._tool_context._cancel()

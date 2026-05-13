@@ -91,6 +91,35 @@ def test_task_execute_uses_task_agent_type(tmp_path) -> None:
     assert request.agent_type.value == "plan"
 
 
+def test_task_execute_passes_required_skill_ids_to_subagent_request(tmp_path) -> None:
+    from core.tools.builtin.task_execute import handle
+
+    state = SessionState(conversation_messages=[])
+    state.task_state.tasks_by_id["task-1"] = TaskRecord(
+        task_id="task-1",
+        subject="Inspect runtime",
+        goal="Inspect runtime deeply",
+        status=TaskStatus.IN_PROGRESS,
+        execution_mode=TaskExecutionMode.FRESH_SUBAGENT,
+        required_skill_ids=["weather", "serper-search"],
+    )
+    state.task_state.ordered_task_ids = ["task-1"]
+
+    fake_result = SimpleNamespace(
+        success=True,
+        output="done",
+        files_modified=[],
+        stop_reason=SubagentStopReason.COMPLETED,
+        turns_used=2,
+    )
+
+    with patch("core.session.subagent.SubagentRuntime.run", return_value=fake_result) as run_mock:
+        handle({"task_id": "task-1"}, _context(state, tmp_path))
+
+    request = run_mock.call_args.args[0]
+    assert request.preloaded_skill_ids == ["weather", "serper-search"]
+
+
 def test_task_execute_fails_when_dependency_missing(tmp_path) -> None:
     from core.tools.builtin.task_execute import handle
 

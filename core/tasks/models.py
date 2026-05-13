@@ -29,6 +29,7 @@ class TaskRecord:
     description: str | None = None
     done_criteria: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
+    required_skill_ids: list[str] = field(default_factory=list)
     result_summary: str | None = None
     files_modified: list[str] = field(default_factory=list)
     stop_reason: str | None = None
@@ -52,6 +53,7 @@ class TaskPacket:
     directive: str
     done_criteria: list[str] = field(default_factory=list)
     agent_type: str | None = None
+    required_skill_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

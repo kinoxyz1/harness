@@ -340,7 +340,8 @@ class ToolExecutorRuntime:
         )
         # Keep per-call identity isolated while sharing runtime state handles.
         call_context._file_state = self._context._file_state
-        call_context._cancelled = self._context._cancelled
+        call_context._cancel_event = self._context._cancel_event
+        call_context._renderer = self._renderer
         call_context._session_state = self._context._session_state
         call_context._skill_registry = self._context._skill_registry
         call_context._set_call_identity(

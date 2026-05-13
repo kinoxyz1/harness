@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import time
 from typing import Any
 
 from ...shared.config import BASH_TIMEOUT
@@ -120,14 +121,33 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
 
     # 执行
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=BASH_TIMEOUT,
         )
-        out = (r.stdout + r.stderr).strip()
+        start = time.time()
+        while True:
+            if context.cancelled:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return ToolInvocationOutcome(
+                    status=ToolOutcomeStatus.CANCELLED,
+                    error="cancelled",
+                    messages=[make_tool_message(context, "Command cancelled by user.")],
+                )
+            if proc.poll() is not None:
+                break
+            if time.time() - start > BASH_TIMEOUT:
+                proc.kill()
+                raise subprocess.TimeoutExpired(command, BASH_TIMEOUT)
+            time.sleep(0.2)
+        stdout, stderr = proc.communicate()
+        out = (stdout + stderr).strip()
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.SUCCESS,
             messages=[make_tool_message(context, out if out else "(no output)")],

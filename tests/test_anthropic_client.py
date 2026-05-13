@@ -1,8 +1,9 @@
 """测试 Anthropic client：响应归一化、LLMResponse 属性。"""
 import pytest
+import threading
 from unittest.mock import MagicMock, patch
 from core.llm.anthropic_client import _parse_response, AnthropicClient, LLMResponse
-from core.llm.client import ContextWindowExceededError
+from core.llm.client import ContextWindowExceededError, RequestCancelledError
 from core.llm.client import ModelRequestOptions
 
 
@@ -162,14 +163,15 @@ class TestClientCall:
         mock_parse_response.return_value = LLMResponse(content="answer")
 
         client = AnthropicClient()
-        client.call(
-            [{"role": "user", "content": "hi"}],
-            request_options=ModelRequestOptions(thinking_mode="disabled"),
-        )
+        with patch("core.llm.anthropic_client.THINKING_MODE", "auto"):
+            client.call(
+                [{"role": "user", "content": "hi"}],
+                request_options=ModelRequestOptions(thinking_mode="disabled"),
+            )
 
-        assert client._adaptive_supported is None
+            assert client._adaptive_supported is None
 
-        client.call([{"role": "user", "content": "hi"}])
+            client.call([{"role": "user", "content": "hi"}])
 
         assert mock_client.messages.create.call_args.kwargs["thinking"] == {"type": "adaptive"}
 
@@ -235,3 +237,65 @@ class TestClientCall:
             client.call([{"role": "user", "content": "hi"}])
 
         assert mock_client.messages.create.call_count == 2
+
+    @patch("core.llm.anthropic_client.create_llm_client")
+    @patch("core.llm.anthropic_client.normalize_messages")
+    @patch("core.llm.anthropic_client.time.sleep")
+    def test_call_retries_transient_gateway_errors(
+        self,
+        mock_sleep,
+        mock_normalize_messages,
+        mock_create_client,
+    ):
+        mock_normalize_messages.return_value = ("", [{"role": "user", "content": "hi"}])
+        mock_response = MagicMock()
+        mock_response.content = []
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [
+            RuntimeError("HTTP/1.1 504 Gateway Time-out"),
+            mock_response,
+        ]
+        mock_create_client.return_value = mock_client
+
+        with patch("core.llm.anthropic_client._parse_response", return_value=LLMResponse(content="ok")):
+            client = AnthropicClient()
+            resp = client.call([{"role": "user", "content": "hi"}])
+
+        assert resp.content == "ok"
+        assert mock_client.messages.create.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("core.llm.anthropic_client.create_llm_client")
+    @patch("core.llm.anthropic_client.normalize_messages")
+    def test_call_raises_request_cancelled_when_cancel_check_trips(
+        self,
+        mock_normalize_messages,
+        mock_create_client,
+    ):
+        mock_normalize_messages.return_value = ("", [{"role": "user", "content": "hi"}])
+        release = threading.Event()
+
+        def slow_call(**kwargs):
+            release.wait(timeout=2.0)
+            return MagicMock(content=[], stop_reason="end_turn", usage=MagicMock(input_tokens=0, output_tokens=0))
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = slow_call
+        mock_create_client.return_value = mock_client
+
+        client = AnthropicClient()
+        calls = {"count": 0}
+
+        def cancel_check() -> bool:
+            calls["count"] += 1
+            return calls["count"] >= 2
+
+        with pytest.raises(RequestCancelledError):
+            client.call(
+                [{"role": "user", "content": "hi"}],
+                request_options=ModelRequestOptions(cancel_check=cancel_check),
+                display=MagicMock(quiet=True),
+            )
+
+        release.set()
+        assert mock_client.close.called

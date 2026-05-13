@@ -20,6 +20,15 @@ MODEL: str = os.environ.get("ANTHROPIC_MODEL", "kimi-k2.5")
 # API 端点，适配不同的 Anthropic 兼容服务（Kimi、GLM、Claude 等）
 BASE_URL: str = os.environ.get("ANTHROPIC_BASE_URL", "https://api.kimi.com/coding/")
 
+# 单次 LLM HTTP 请求的客户端超时（秒）。应显著小于上游网关超时，避免本地无限等待。
+LLM_REQUEST_TIMEOUT: float = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180"))
+
+# 遇到 502/503/504 这类瞬时网关错误时的最大重试次数。
+LLM_RETRY_ATTEMPTS: int = int(os.environ.get("LLM_RETRY_ATTEMPTS", "2"))
+
+# 瞬时网关错误重试的基础退避时间（秒）。
+LLM_RETRY_BACKOFF_SECONDS: float = float(os.environ.get("LLM_RETRY_BACKOFF_SECONDS", "1.5"))
+
 # 模型单次响应的最大 token 数，控制输出长度上限
 MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
 

@@ -82,11 +82,43 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
     packet = compile_task_packet(task)
     agent_type = SubagentType(task.agent_type) if task.agent_type else SubagentType.GENERAL
     runtime = SubagentRuntime(parent_context=context)
+
+    def emit(event: dict[str, Any]) -> None:
+        renderer = context.renderer
+        if renderer is None:
+            return
+        event_name = event.get("event", "")
+        task_ref = event.get("task_id", task.task_id)
+        if event_name == "subagent_start":
+            renderer.show_status(
+                f"subagent[{task_ref}] 已启动 ({event.get('agent_type', agent_type.value)})"
+            )
+            return
+        if event_name == "subagent_tool_call":
+            renderer.show_status(
+                f"subagent[{task_ref}] 调用 {event.get('tool_name', 'unknown')}"
+            )
+            return
+        if event_name == "subagent_done":
+            renderer.show_status(
+                f"subagent[{task_ref}] 已结束 ({event.get('stop_reason', 'unknown')}, turns={event.get('turns_used', 0)})"
+            )
+            return
+        if event_name == "subagent_error":
+            renderer.show_error(str(event.get("content", "subagent error")))
+
+    if context.renderer is not None:
+        skills = ", ".join(task.required_skill_ids) if task.required_skill_ids else "none"
+        context.renderer.show_status(
+            f"派发 fresh_subagent {task.task_id}: {task.subject} | skills={skills}"
+        )
     sub_result = runtime.run(
         SubagentRequest(
             task_packet=packet,
             agent_type=agent_type,
-        )
+            preloaded_skill_ids=list(task.required_skill_ids),
+        ),
+        emit=emit if context.renderer is not None else None,
     )
     normalized = normalize_subagent_result(task.task_id, sub_result)
 

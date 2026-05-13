@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -111,8 +112,9 @@ class ToolUseContext:
         self._tool_name: str = ""
         self._tool_call_id: str = ""
         self._turn_count: int = 0
+        self._renderer: Any = None
         self._file_state: dict[str, FileState] = {}
-        self._cancelled: bool = False
+        self._cancel_event = threading.Event()
         self._session_state: Any = None
         self._skill_registry: Any = None
 
@@ -165,7 +167,7 @@ class ToolUseContext:
 
     @property
     def cancelled(self) -> bool:
-        return self._cancelled
+        return self._cancel_event.is_set()
 
     @property
     def session_state(self) -> Any:
@@ -175,8 +177,15 @@ class ToolUseContext:
     def skill_registry(self) -> Any:
         return self._skill_registry
 
+    @property
+    def renderer(self) -> Any:
+        return self._renderer
+
     def _cancel(self) -> None:
-        self._cancelled = True
+        self._cancel_event.set()
+
+    def _reset_cancel(self) -> None:
+        self._cancel_event.clear()
 
     def bind_runtime(self, *, session_state: Any | None = None, skill_registry: Any | None = None) -> None:
         """绑定运行时句柄；工具通过显式 updates 回写 session/run state。"""

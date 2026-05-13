@@ -90,3 +90,31 @@ def test_handle_input_drops_surrogate_characters_before_submit():
         agent_loop.handle_input("你\udce5好", engine)
 
     assert engine.messages == ["你好"]
+
+
+def test_run_abort_monitor_uses_cbreak_not_raw_for_live_cancellation():
+    class FakeStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 0
+
+    stdin = FakeStdin()
+    callback_calls = []
+
+    with (
+        patch.object(agent_loop.termios, "tcgetattr", return_value=["orig"]) as mock_getattr,
+        patch.object(agent_loop.termios, "tcsetattr") as mock_setattr,
+        patch.object(agent_loop.tty, "setcbreak") as mock_setcbreak,
+        patch.object(agent_loop.tty, "setraw") as mock_setraw,
+        patch.object(agent_loop, "select", return_value=([], [], [])),
+    ):
+        with agent_loop.RunAbortMonitor(stdin, lambda: callback_calls.append(True)):
+            pass
+
+    mock_getattr.assert_called_once_with(0)
+    mock_setcbreak.assert_called_once_with(0)
+    mock_setraw.assert_not_called()
+    mock_setattr.assert_called_once()
+    assert callback_calls == []

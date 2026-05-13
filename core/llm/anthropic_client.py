@@ -14,8 +14,15 @@ from typing import Any
 
 from rich.console import Console
 
-from ..shared.config import MAX_TOKENS, MODEL, THINKING_MODE, THINKING_BUDGET
-from .client import ContextWindowExceededError, ModelRequestOptions
+from ..shared.config import (
+    LLM_RETRY_ATTEMPTS,
+    LLM_RETRY_BACKOFF_SECONDS,
+    MAX_TOKENS,
+    MODEL,
+    THINKING_BUDGET,
+    THINKING_MODE,
+)
+from .client import ContextWindowExceededError, ModelRequestOptions, RequestCancelledError
 from .factory import create_llm_client
 from .protocol import normalize_messages
 from ..shared.run_options import RunDisplayOptions
@@ -130,6 +137,30 @@ class AnthropicClient:
         if self._is_context_window_exceeded(err):
             raise ContextWindowExceededError(str(err))
 
+    def _is_transient_gateway_error(self, err: Exception) -> bool:
+        text = str(err).lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "504",
+                "502",
+                "503",
+                "gateway time-out",
+                "gateway timeout",
+                "bad gateway",
+                "service unavailable",
+            )
+        )
+
+    def _reset_client(self) -> None:
+        try:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+        self._client = create_llm_client()
+
     def call(
         self,
         messages: list[dict[str, Any]],
@@ -186,71 +217,69 @@ class AnthropicClient:
             self._apply_thinking(params)
         adaptive_probe_attempted = params.get("thinking", {}).get("type") == "adaptive"
 
-        result: dict[str, Any] = {}
-        error: dict[str, Any] = {}
-
-        def do_call() -> None:
-            try:
-                result["data"] = self._client.messages.create(**params)
-            except Exception as e:
-                error["data"] = e
-
         start = time.time()
-        thread = threading.Thread(target=do_call)
-        thread.start()
+        attempts = max(2 if adaptive_probe_attempted else 1, LLM_RETRY_ATTEMPTS)
 
-        while thread.is_alive():
-            elapsed = int(time.time() - start)
-            if not display.quiet:
-                sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
-                sys.stdout.flush()
-            thread.join(timeout=1.0)
+        for attempt in range(1, attempts + 1):
+            result: dict[str, Any] = {}
+            error: dict[str, Any] = {}
 
-        if not display.quiet:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
+            def do_call() -> None:
+                try:
+                    result["data"] = self._client.messages.create(**params)
+                except Exception as e:
+                    error["data"] = e
 
-        if error.get("data"):
-            err = error["data"]
-            if isinstance(err, Exception):
-                self._raise_context_window_exceeded_if_needed(err)
-            # adaptive 不支持时自动 fallback 到 enabled
-            if (
-                self._adaptive_supported is None
-                and isinstance(err, Exception)
-                and "adaptive" in str(err).lower()
-            ):
-                self._adaptive_supported = False
-                params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
-                result.clear()
-                error.clear()
+            thread = threading.Thread(target=do_call, daemon=True)
+            thread.start()
 
-                def do_retry() -> None:
-                    try:
-                        result["data"] = self._client.messages.create(**params)
-                    except Exception as e:
-                        error["data"] = e
-
-                retry_thread = threading.Thread(target=do_retry)
-                retry_thread.start()
-                while retry_thread.is_alive():
-                    elapsed = int(time.time() - start)
+            while thread.is_alive():
+                elapsed = int(time.time() - start)
+                if request_options.cancel_check and request_options.cancel_check():
                     if not display.quiet:
-                        sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
+                        sys.stdout.write("\r\033[K")
                         sys.stdout.flush()
-                    retry_thread.join(timeout=1.0)
-                if error.get("data"):
-                    retry_err = error["data"]
-                    if isinstance(retry_err, Exception):
-                        self._raise_context_window_exceeded_if_needed(retry_err)
-                    raise retry_err
-            else:
+                    self._reset_client()
+                    raise RequestCancelledError("request cancelled by user")
+                if not display.quiet:
+                    sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
+                    sys.stdout.flush()
+                thread.join(timeout=1.0)
+
+            if not display.quiet:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
+
+            if error.get("data"):
+                err = error["data"]
+                if isinstance(err, Exception):
+                    self._raise_context_window_exceeded_if_needed(err)
+                if (
+                    self._adaptive_supported is None
+                    and isinstance(err, Exception)
+                    and "adaptive" in str(err).lower()
+                ):
+                    self._adaptive_supported = False
+                    params["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
+                    continue
+                if (
+                    attempt < attempts
+                    and isinstance(err, Exception)
+                    and self._is_transient_gateway_error(err)
+                ):
+                    time.sleep(LLM_RETRY_BACKOFF_SECONDS * attempt)
+                    self._reset_client()
+                    continue
                 raise err
+
+            response = result["data"]
+            break
+        else:
+            raise RuntimeError("LLM call exhausted retry loop without response")
 
         if self._adaptive_supported is None and adaptive_probe_attempted:
             self._adaptive_supported = True
 
-        response = result["data"]
         elapsed = time.time() - start
 
         llm_resp = _parse_response(response)

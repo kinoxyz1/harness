@@ -169,6 +169,8 @@ def _render_fresh_packet(packet: TaskPacket) -> str:
     sections = [f"Task: {packet.title}", "", "Directive:", packet.directive]
     if packet.done_criteria:
         sections.extend(["", "Done criteria:"] + [f"- {item}" for item in packet.done_criteria])
+    if packet.required_skill_ids:
+        sections.extend(["", "Preloaded skills:"] + [f"- {item}" for item in packet.required_skill_ids])
     return "\n".join(sections)
 
 

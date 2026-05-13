@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import sys
 import termios
+import threading
 import tty
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from select import select
 
 from core.shared.config import MAX_TURNS
 from core.shared.env_loader import load_project_env
@@ -221,6 +223,47 @@ class TerminalLineEditor:
         self.stdout.flush()
 
 
+class RunAbortMonitor:
+    """During execution, watch stdin for Esc/Ctrl-C and request cancellation."""
+
+    def __init__(self, stdin, callback) -> None:
+        self.stdin = stdin
+        self._callback = callback
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._triggered = False
+        self._original = None
+
+    def __enter__(self):
+        if not self.stdin.isatty():
+            return self
+        fd = self.stdin.fileno()
+        self._original = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+        if self._original is not None:
+            termios.tcsetattr(self.stdin.fileno(), termios.TCSADRAIN, self._original)
+
+    def _watch(self) -> None:
+        fd = self.stdin.fileno()
+        while not self._stop.is_set():
+            ready, _, _ = select([fd], [], [], 0.1)
+            if not ready:
+                continue
+            ch = self.stdin.read(1)
+            if ch in ("\x1b", "\x03") and not self._triggered:
+                self._triggered = True
+                self._callback()
+                return
+
+
 def read_user_input(prompt: str = ">> ") -> str | None:
     return TerminalLineEditor(sys.stdin, sys.stdout).readline(prompt)
 
@@ -297,7 +340,8 @@ def main() -> None:
             console.print("[dim]再见！[/dim]")
             break
 
-        handle_input(query, engine)
+        with RunAbortMonitor(sys.stdin, lambda: engine.request_cancel()):
+            handle_input(query, engine)
         print()
 
 

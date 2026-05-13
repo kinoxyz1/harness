@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from core.policy.base import PolicyRunner
 from core.policy.todo_tracking import TodoPlanningPolicy
+from core.llm.client import RequestCancelledError
 from core.query.loop import QueryLoop
 from core.query.reducers import TransitionReason
 from core.query.result import StopReason
@@ -92,6 +93,16 @@ class FakeModelGatewayWithToolTurn:
 
     def call_once(self, messages, *, system="", tools):
         return self._responses.pop(0)
+
+
+class FakeCancelledModelGateway:
+    def call_once(self, messages, *, system="", tools, request_options=None):
+        raise RequestCancelledError("cancelled")
+
+
+class FakeErroredModelGateway:
+    def call_once(self, messages, *, system="", tools, request_options=None):
+        raise RuntimeError("HTTP/1.1 504 Gateway Time-out")
 
 
 class FakeToolRuntime:
@@ -266,4 +277,52 @@ def test_query_loop_uses_governor_before_view_builder_and_surfaces_status() -> N
 
     assert result.stop_reason == StopReason.COMPLETED
     assert builder.last_messages == [{"role": "user", "content": "prepared"}]
-    assert renderer.status_calls == ["上下文管理: per_message_budget,microcompact 1200->800"]
+    assert renderer.status_calls == ["上下文管理: microcompact 1k→0k (↓0k)"]
+
+
+def test_query_loop_returns_aborted_when_model_request_is_cancelled() -> None:
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=FakeCancelledModelGateway(),
+        tool_runtime=object(),
+        tool_context=SimpleNamespace(cancelled=True),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        renderer=FakeRenderer(),
+    )
+
+    assert result.stop_reason == StopReason.ABORTED
+    assert result.success is False
+    assert result.final_output == "已取消当前运行。"
+
+
+def test_query_loop_returns_api_error_when_model_request_fails() -> None:
+    session_state = SessionState(conversation_messages=[])
+    store = SessionStore(session_state)
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=FakeErroredModelGateway(),
+        tool_runtime=object(),
+        tool_context=SimpleNamespace(cancelled=False),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        renderer=FakeRenderer(),
+    )
+
+    assert result.stop_reason == StopReason.API_ERROR
+    assert result.success is False
+    assert "504 Gateway Time-out" in result.final_output

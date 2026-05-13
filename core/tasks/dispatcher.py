@@ -15,6 +15,7 @@ def compile_task_packet(task: TaskRecord) -> TaskPacket:
         directive=directive,
         done_criteria=list(task.done_criteria),
         agent_type=task.agent_type,
+        required_skill_ids=list(task.required_skill_ids),
     )
 
 

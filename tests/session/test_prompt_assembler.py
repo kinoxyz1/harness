@@ -121,8 +121,8 @@ def test_build_stable_includes_stronger_todo_guidance(tmp_path: Path) -> None:
 
     stable = assembler.build_stable(state, project_root=str(tmp_path))
 
-    assert "多步骤任务必须使用 todo" in stable
-    assert "如果 skill 刚展开" in stable
+    assert "复杂多步骤任务必须先调用 task_plan" in stable
+    assert "在 TaskState 建立前，不要先加载 skill" in stable
 
 
 def test_stable_cache_key_changes_when_system_prompt_text_changes(
@@ -598,8 +598,8 @@ def test_build_stable_includes_stronger_todo_guidance(tmp_path: Path) -> None:
 
     stable = assembler.build_stable(state, project_root=str(tmp_path))
 
-    assert "多步骤任务必须使用 todo" in stable
-    assert "如果 skill 刚展开" in stable
+    assert "复杂多步骤任务必须先调用 task_plan" in stable
+    assert "在 TaskState 建立前，不要先加载 skill" in stable
 
 
 def test_stable_cache_key_changes_when_system_prompt_text_changes(
@@ -892,7 +892,7 @@ def test_build_stable_switches_from_todo_guidance_to_task_plan_guidance(tmp_path
 
     stable = assembler.build_stable(state, project_root=str(tmp_path))
 
-    assert "复杂多步骤任务优先使用 task_plan" in stable
+    assert "复杂多步骤任务必须先调用 task_plan" in stable
     assert "TaskState 激活时不要再把 todo 当权威状态" in stable
 
 

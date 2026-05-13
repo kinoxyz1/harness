@@ -492,7 +492,7 @@ V2 的关键判断是：
 
 ## 7.4 结果信封：`SubagentResultEnvelope`
 
-V2 要求 subagent 的正式返回值始终结构化：
+V2 要求 subagent 的正式返回值始终结构化，但第一版结果契约应保持最小而稳定：
 
 ```python
 @dataclass
@@ -502,22 +502,21 @@ class SubagentResultEnvelope:
     success: bool
     completion_kind: Literal["completed", "blocked", "failed", "cancelled"]
     summary: str
-    answer: str
-    findings: list[str]
+    raw_text: str
     artifacts: list[str]
     files_modified: list[str]
-    sources: list[str]
     open_questions: list[str]
     recommended_next_steps: list[str]
     failure_reason: str | None
     trace_ref: str | None
+    metadata: dict[str, Any]
 ```
 
 要求：
 
 1. `summary` 给用户看
-2. `answer / findings / sources / open_questions` 给主线程消费
-3. `trace_ref` 指向完整原始执行痕迹
+2. `raw_text / open_questions / recommended_next_steps` 给主线程消费
+3. `trace_ref / metadata` 指向完整原始执行痕迹与执行元信息
 
 不再接受“只有自然语言字符串”的结果协议。
 
@@ -570,7 +569,7 @@ V2 中：
 - 约束条件是什么
 - 结果要以什么形式返回
 
-例如天气 / 行程类任务，如果缺失这些字段，dispatch compiler 应视为不合格：
+例如天气 / 行程类任务，如果缺失这些字段，dispatch compiler 应视为高风险低质量派发：
 
 - 具体日期
 - 起点 / 终点
@@ -579,6 +578,8 @@ V2 中：
 - 输出粒度
 
 V2 不允许“只写一句泛化目标就起 fresh_subagent”。
+
+第一版实现中，这类检查默认应先以 `warning` 形式暴露给用户和主线程，而不是一律 hard fail。只有在明确配置了严格策略时，才应升级为阻断。
 
 ## 8.3 `fork` 协议
 
@@ -650,15 +651,16 @@ class SubagentEvent:
 建议的 `kind`：
 
 - `dispatch_started`
-- `context_prepared`
-- `skill_preloaded`
 - `tool_started`
 - `tool_finished`
-- `assistant_status`
-- `milestone`
 - `blocked`
 - `completed`
 - `failed`
+
+说明：
+
+1. 第一版用户可见事件应收敛为最小集合：`dispatch_started`、`tool_started`、`tool_finished`、`completed/failed/blocked`
+2. `context_prepared`、`skill_preloaded`、`assistant_status`、`milestone` 可作为内部保留事件类型，但不应默认展示给用户
 
 ## 9.2 事件生产原则
 
@@ -666,6 +668,7 @@ class SubagentEvent:
 2. renderer 只消费事件，不自己发明事件。
 3. `tool_started` 必须在真实工具执行前发出。
 4. 长任务必须周期性产生可见状态变化。
+5. 第一版 transport 应优先使用同步 callback；是否升级到独立总线是后续实现决策，不是本阶段前提。
 
 ## 9.3 渲染原则
 
@@ -689,6 +692,15 @@ renderer 默认输出两层内容：
   ✓ 子代理完成：返回天气、交通、景点、推荐活动
 ```
 
+默认渲染约束：
+
+1. 工具开始时立即可见，不允许批处理后回放。
+2. 工具结果默认只显示摘要，不原样喷长输出。
+3. 长时间运行任务要有阶段变化或心跳，不允许用户连续几十秒什么都看不到。
+4. 子代理中的细碎内部思考默认不展示；对用户展示状态和关键动作即可。
+5. 默认采用 compact 模式：`tool_started` 只显示工具名和一行摘要，`tool_finished` 只显示结果摘要。
+6. dispatch preview 默认只展示关键字段；完整 envelope 通过 verbose 模式查看。
+
 ## 9.4 为什么不能继续只靠 ToolExecutorRuntime 渲染
 
 因为那样会持续把“子代理可见性”绑定在“工具是否在主线程 runtime 中被当成通用工具执行”上，结构是反的。
@@ -697,7 +709,7 @@ renderer 默认输出两层内容：
 
 ```text
 Subagent Session
-  -> Event Bus
+  -> Event Sink / Callback
   -> Renderer / Timeline Store
 ```
 
@@ -724,7 +736,38 @@ subagent 完成后，主线程必须拿到：
 
 三者不能混在一个字符串里。
 
-## 10.2 主线程合并规则
+## 10.2 最小结果信封
+
+V2 仍然要求正式结果契约，但第一版不应把语义字段拆得过细。推荐最小结果结构：
+
+```python
+@dataclass
+class SubagentResultEnvelope:
+    task_id: str
+    dispatch_id: str
+    success: bool
+    completion_kind: Literal["completed", "blocked", "failed", "cancelled"]
+    summary: str
+    raw_text: str
+    artifacts: list[str]
+    files_modified: list[str]
+    open_questions: list[str]
+    recommended_next_steps: list[str]
+    failure_reason: str | None
+    trace_ref: str | None
+    metadata: dict[str, Any]
+```
+
+解释：
+
+1. `summary` 用于终端展示和主线程压缩引用
+2. `raw_text` 保留 subagent 的原始文本结论，避免过度结构化带来的脆弱性
+3. `open_questions` / `recommended_next_steps` 保留主线程后续规划真正需要的结构
+4. `metadata` 容纳 `turns_used`、`duration_ms`、token 用量等执行信息
+
+这比“只有字符串”更可靠，也比把结果拆成过多语义字段更稳。
+
+## 10.3 主线程合并规则
 
 主线程收到 `SubagentResultEnvelope` 后：
 
@@ -732,9 +775,9 @@ subagent 完成后，主线程必须拿到：
 2. 更新任务状态与 timeline
 3. 只把 `summary` 与必要结论写入用户可见主对话
 4. 把详细 trace 留在 artifact / trace store
-5. 允许主 Agent 基于 `findings / open_questions / recommended_next_steps` 继续规划下一步
+5. 允许主 Agent 基于 `raw_text / open_questions / recommended_next_steps` 继续规划下一步
 
-## 10.3 为什么 V2 不再接受“自然语言字符串就是结果”
+## 10.4 为什么 V2 不再接受“自然语言字符串就是结果”
 
 因为那会持续造成三个问题：
 
@@ -744,7 +787,7 @@ subagent 完成后，主线程必须拿到：
 
 V2 明确规定：
 
-> 自然语言文本只是 `SubagentResultEnvelope.summary / answer` 的表现形式，不是协议本身。
+> 自然语言文本只是 `SubagentResultEnvelope.summary / raw_text` 的表现形式，不是协议本身。
 
 ---
 
@@ -791,7 +834,25 @@ V2 建议最终形成三类一等接口：
 
 以下阶段顺序是本设计的核心要求，必须按顺序推进。
 
-## 12.1 Phase 1：派发质量
+## 12.1 Phase 0：Bug Fixes 与回归基线
+
+目标：
+
+- 先修掉当前已确认的 4 个断点，建立稳定回归基线
+
+### Phase 0 必做项
+
+1. 修复 subagent `SessionEngine` 未传 `tools=` 的 P0 问题
+2. 修复 `task_context` 已编译但未渲染的问题
+3. 修复 `_build_call_context()` 未传递 renderer 的问题
+4. 修复工具事件批处理后回放的问题，让开始事件在执行前可见
+5. 同步补齐对应 regression tests
+
+### Phase 0 说明
+
+Phase 0 是必要前置，不替代后续协议和控制平面工作。它解决的是已确认 bug，不等于自动解决了 `fresh/fork` 的正式协议、结果契约和长期控制平面问题。
+
+## 12.2 Phase 1：派发质量
 
 目标：
 
@@ -808,6 +869,7 @@ V2 建议最终形成三类一等接口：
    - `fork` 缺父快照或 delta
 4. 在派发前向用户展示完整 dispatch preview。
 5. 强制 renderer 与 prompt renderer 使用同一份 envelope 数据源，避免“展示看到的边界”和“真正发给模型的边界”不一致。
+6. 第一版 validation 默认先发 warning；只有 strict policy 才做阻断。
 
 ### Phase 1 直接解决的问题
 
@@ -820,7 +882,7 @@ V2 建议最终形成三类一等接口：
 - 完整实时事件流
 - 正式结果 envelope 的全量消费
 
-## 12.2 Phase 2：执行可见性
+## 12.3 Phase 2：执行可见性
 
 目标：
 
@@ -829,8 +891,8 @@ V2 建议最终形成三类一等接口：
 ### Phase 2 必做项
 
 1. 引入 `SubagentEvent` 正式事件模型。
-2. 子代理工具调用开始时立即发 `tool_started`。
-3. 子代理阶段变化和 milestone 正式事件化。
+2. 第一版 transport 使用 `on_event` callback，保持同步直传。
+3. 子代理工具调用开始时立即发 `tool_started`。
 4. renderer 改为消费事件流，而不是直接读 tool runtime 内部状态。
 5. 终端默认采用“任务卡片 + 关键事件流”混合模式。
 
@@ -840,7 +902,7 @@ V2 建议最终形成三类一等接口：
 - 复杂任务越久越像挂住
 - 子代理有没有真的在做事不可见
 
-## 12.3 Phase 3：结果回收
+## 12.4 Phase 3：结果回收
 
 目标：
 
@@ -848,11 +910,12 @@ V2 建议最终形成三类一等接口：
 
 ### Phase 3 必做项
 
-1. 引入 `SubagentResultEnvelope` 正式结果契约。
+1. 引入最小 `SubagentResultEnvelope` 正式结果契约。
 2. 主线程按 envelope 结构化消费，不再依赖自然语言字符串解析。
 3. 大型原始材料默认落 trace/artifact，不污染主对话。
 4. 对失败、阻塞、取消状态给出正式 completion kind。
 5. 支持主线程基于 `open_questions / recommended_next_steps` 继续规划。
+6. 第一版保留 `raw_text`，不强制把结果拆成过多语义字段。
 
 ### Phase 3 直接解决的问题
 
@@ -931,8 +994,9 @@ V2 必须采用“协议测试 + 事件测试 + 端到端体验测试”的组�
 
 1. `fresh` envelope 编译
 2. `fork` envelope 编译
-3. 搜索任务缺关键字段时 validation fail
+3. 搜索任务缺关键字段时 validation warning / strict fail
 4. display preview 与 model input 使用同一份 envelope
+5. `compile_task_packet` 或其兼容层的字段映射、默认值回退、revision 递增
 
 ## 14.2 事件测试
 
@@ -941,6 +1005,7 @@ V2 必须采用“协议测试 + 事件测试 + 端到端体验测试”的组�
 1. `tool_started` 必须在真实工具完成前可见
 2. 长任务必须产生可见状态变化
 3. renderer 只消费事件，不旁路读取 runtime 内部状态
+4. 第一版 callback transport 能稳定把事件传到 renderer
 
 ## 14.3 结果测试
 
@@ -949,9 +1014,19 @@ V2 必须采用“协议测试 + 事件测试 + 端到端体验测试”的组�
 1. subagent 成功返回 envelope
 2. blocked / failed / cancelled 路径
 3. 大型 trace 不污染主对话
-4. 主线程能消费结构化 `findings / open_questions`
+4. 主线程能消费 `raw_text / open_questions / recommended_next_steps`
 
-## 14.4 端到端场景测试
+## 14.4 Regression Tests（Phase 0 必需）
+
+至少补齐以下回归测试：
+
+1. `SubagentRuntime.run()` 创建的 `SessionEngine` 收到 `tools` 参数，且下游模型调用不会再出现 `tools=None`
+2. `_render_fresh_packet()` 的输出包含 `task_context`
+3. `_build_call_context()` 传递 renderer
+4. 工具开始事件在真实工具完成前可见，不再批处理后回放
+5. `task_execute.handle()` 的错误路径：unknown task、subagent failure
+
+## 14.5 端到端场景测试
 
 V2 至少应保留一个高噪声真实场景作为回归基线，例如：
 
@@ -1018,3 +1093,5 @@ V2 至少应保留一个高噪声真实场景作为回归基线，例如：
 V2 的判断非常明确：
 
 > 要让联网搜索和高噪声探索任务真正成为 subagent 的最优解，就必须把 `Task`、`DispatchEnvelope`、`SubagentEvent` 和 `SubagentResultEnvelope` 一起升级为主路径能力，而不是继续在旧 runtime 上叠体验补丁。
+
+

@@ -10,8 +10,12 @@ def test_create_llm_client_sets_explicit_timeout_for_long_nonstreaming_requests(
     monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
     monkeypatch.setattr(factory, "API_KEY", "test-key")
     monkeypatch.setattr(factory, "BASE_URL", "")
+    monkeypatch.setattr(factory, "LLM_REQUEST_TIMEOUT", 123.0)
 
     client = factory.create_llm_client()
+
+    assert "SSLKEYLOGFILE" not in factory.os.environ
+    assert client.timeout == 123.0
 
     def fail_after_timeout_check(*args, **kwargs):
         raise RuntimeError("post called")

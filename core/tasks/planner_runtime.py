@@ -19,6 +19,7 @@ def normalize_task_payload(raw: dict, *, index: int, previous: TaskState | None)
         description=raw.get("description"),
         done_criteria=list(raw.get("done_criteria") or []),
         depends_on=list(raw.get("depends_on") or []),
+        required_skill_ids=list(raw.get("required_skill_ids") or []),
     )
 
 

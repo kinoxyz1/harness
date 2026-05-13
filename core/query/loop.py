@@ -22,7 +22,7 @@ from core.query.state import RunState
 from core.session.state import TodoItem
 from core.tools.context import SessionUpdateKind
 from core.tools.runtime import ToolBatchResult, ToolCall
-from core.llm.client import ContextWindowExceededError
+from core.llm.client import ContextWindowExceededError, ModelRequestOptions, RequestCancelledError
 
 
 # ─── 工具调用解析 ────────────────────────────────────────────────────────────
@@ -311,8 +311,25 @@ class QueryLoop:
 
             # ── 步骤 3：调用模型 ─────────────────────────────────────
             active_tools = None if state.stop_reason == "max_turns" else view.tools
+            request_options = ModelRequestOptions(
+                cancel_check=(lambda: tool_context.cancelled) if tool_context is not None else None
+            )
             try:
-                model_resp = model_gateway.call_once(view.messages, system=view.system, tools=active_tools)
+                try:
+                    model_resp = model_gateway.call_once(
+                        view.messages,
+                        system=view.system,
+                        tools=active_tools,
+                        request_options=request_options,
+                    )
+                except TypeError as exc:
+                    if "request_options" not in str(exc):
+                        raise
+                    model_resp = model_gateway.call_once(
+                        view.messages,
+                        system=view.system,
+                        tools=active_tools,
+                    )
             except ContextWindowExceededError:
                 if state.reactive_recovery_attempted:
                     raise
@@ -327,6 +344,26 @@ class QueryLoop:
                 )
                 state.reactive_recovery_attempted = True
                 continue
+            except RequestCancelledError:
+                return QueryResult(
+                    final_output="已取消当前运行。",
+                    stop_reason=StopReason.ABORTED,
+                    success=False,
+                    turns_used=state.turn_count,
+                    tool_calls_executed=state.tool_calls_executed,
+                    files_modified=state.files_modified,
+                )
+            except Exception as exc:
+                if renderer is not None and hasattr(renderer, "show_error"):
+                    renderer.show_error(f"模型请求失败: {exc}")
+                return QueryResult(
+                    final_output=f"模型请求失败：{exc}",
+                    stop_reason=StopReason.API_ERROR,
+                    success=False,
+                    turns_used=state.turn_count,
+                    tool_calls_executed=state.tool_calls_executed,
+                    files_modified=state.files_modified,
+                )
             prompt_tokens = getattr(model_resp, "prompt_tokens", None)
             if isinstance(prompt_tokens, int):
                 session_state.compact_state["last_prompt_tokens"] = prompt_tokens

@@ -79,6 +79,7 @@ def test_task_plan_schema_exposes_redesign_fields_without_fork() -> None:
             "description",
             "done_criteria",
             "depends_on",
+            "required_skill_ids",
         ]
     )
     assert item_props["execution_mode"]["enum"] == ["local", "fresh_subagent"]
@@ -176,6 +177,7 @@ def test_task_plan_persists_description_done_criteria_and_depends_on(tmp_path) -
                     "description": "Read task runtime and explain the breakpoints.",
                     "done_criteria": ["List root causes", "Name exact files"],
                     "depends_on": ["task-0"],
+                    "required_skill_ids": ["weather", "serper-search"],
                 }
             ]
         },
@@ -188,3 +190,4 @@ def test_task_plan_persists_description_done_criteria_and_depends_on(tmp_path) -
     assert task.description == "Read task runtime and explain the breakpoints."
     assert task.done_criteria == ["List root causes", "Name exact files"]
     assert task.depends_on == ["task-0"]
+    assert task.required_skill_ids == ["weather", "serper-search"]

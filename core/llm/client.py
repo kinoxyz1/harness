@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from typing import Callable
 from typing import Literal
 
 from .response import ModelResponse
@@ -12,9 +13,14 @@ class ModelRequestOptions:
     query_source: str = "main_loop"
     max_output_tokens: int | None = None
     thinking_mode: Literal["default", "disabled"] = "default"
+    cancel_check: Callable[[], bool] | None = None
 
 
 class ContextWindowExceededError(RuntimeError):
+    pass
+
+
+class RequestCancelledError(RuntimeError):
     pass
 
 

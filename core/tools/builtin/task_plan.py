@@ -45,6 +45,7 @@ SCHEMA: dict[str, Any] = {
                         "description": {"type": "string"},
                         "done_criteria": {"type": "array", "items": {"type": "string"}},
                         "depends_on": {"type": "array", "items": {"type": "string"}},
+                        "required_skill_ids": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["subject", "goal"],
                 },
