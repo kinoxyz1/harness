@@ -74,7 +74,7 @@ class StreamAccumulator:
             "completed": self._completed,
         }
 
-    def finalize(self):
+    def finalize(self) -> ModelResponse:
         from core.llm.response import ModelResponse
 
         if not self._completed:
