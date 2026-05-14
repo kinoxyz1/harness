@@ -27,9 +27,10 @@ class FakeEngine:
 def test_cli_routes_skills_command_to_handle_command():
     engine = FakeEngine()
     with patch.object(agent_loop.console, "print") as mock_print:
-        result = agent_loop.handle_input("/skills list", engine)
+        should_continue, resume_id = agent_loop.handle_input("/skills list", engine)
 
-    assert result is True
+    assert should_continue is True
+    assert resume_id is None
     assert engine.commands == ["/skills list"]
     assert engine.messages == []
     mock_print.assert_called_with("command output")
@@ -38,9 +39,10 @@ def test_cli_routes_skills_command_to_handle_command():
 def test_cli_routes_normal_input_to_submit():
     engine = FakeEngine()
     with patch.object(agent_loop, "render_markdown") as mock_render:
-        result = agent_loop.handle_input("hello world", engine)
+        should_continue, resume_id = agent_loop.handle_input("hello world", engine)
 
-    assert result is True
+    assert should_continue is True
+    assert resume_id is None
     assert engine.commands == []
     assert engine.messages == ["hello world"]
     mock_render.assert_called_once()
@@ -48,8 +50,9 @@ def test_cli_routes_normal_input_to_submit():
 
 def test_cli_returns_true_for_empty_input():
     engine = FakeEngine()
-    result = agent_loop.handle_input("  ", engine)
-    assert result is True
+    should_continue, resume_id = agent_loop.handle_input("  ", engine)
+    assert should_continue is True
+    assert resume_id is None
     assert engine.commands == []
     assert engine.messages == []
 

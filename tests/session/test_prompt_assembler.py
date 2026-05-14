@@ -105,14 +105,15 @@ def test_stable_cache_key_includes_prompt_digest(tmp_path: Path) -> None:
     # Build once
     assembler.build_stable(state, project_root=str(tmp_path))
 
-    # Cache key should include a digest, not just revision
+    # Cache key should include a digest and memory fingerprint
     cache_keys = list(state.prompt_cache.keys())
     assert len(cache_keys) == 1
-    # Key should be: stable_system_prompt:no-skills:<12-char-digest>
+    # Key should be: stable_system_prompt:no-skills:<12-char-digest>:<8-char-memory-fp>
     parts = cache_keys[0].split(":")
-    assert len(parts) == 3
+    assert len(parts) == 4
     assert parts[0] == "stable_system_prompt"
     assert len(parts[2]) == 12  # sha256 digest truncated to 12 chars
+    assert len(parts[3]) == 8   # memory fingerprint truncated to 8 chars
 
 
 def test_build_stable_scopes_skill_gate_to_preplan_only(tmp_path: Path) -> None:
@@ -583,14 +584,15 @@ def test_stable_cache_key_includes_prompt_digest(tmp_path: Path) -> None:
     # Build once
     assembler.build_stable(state, project_root=str(tmp_path))
 
-    # Cache key should include a digest, not just revision
+    # Cache key should include a digest and memory fingerprint
     cache_keys = list(state.prompt_cache.keys())
     assert len(cache_keys) == 1
-    # Key should be: stable_system_prompt:no-skills:<12-char-digest>
+    # Key should be: stable_system_prompt:no-skills:<12-char-digest>:<8-char-memory-fp>
     parts = cache_keys[0].split(":")
-    assert len(parts) == 3
+    assert len(parts) == 4
     assert parts[0] == "stable_system_prompt"
     assert len(parts[2]) == 12  # sha256 digest truncated to 12 chars
+    assert len(parts[3]) == 8   # memory fingerprint truncated to 8 chars
 
 
 def test_build_stable_includes_stronger_todo_guidance(tmp_path: Path) -> None:
