@@ -11,6 +11,7 @@ from core.skills.runtime import apply_skill_invocation
 class CommandResult:
     handled: bool
     output: str = ""
+    resume_session_id: str | None = None
 
 
 def is_skills_command(raw: str) -> bool:
@@ -118,3 +119,33 @@ def execute_skills_command(raw: str, *, state, registry: SkillRegistry) -> Comma
         return CommandResult(True, "Reloaded skills")
 
     return CommandResult(True, "Usage: /skills list|show <id>|use <id>|off <id>|reload")
+
+
+def is_resume_command(raw: str) -> bool:
+    return raw.strip().startswith("/resume")
+
+
+def execute_resume_command(raw: str, *, session_db) -> CommandResult:
+    parts = raw.strip().split()
+    if len(parts) == 1 or (len(parts) == 2 and parts[1] == "list"):
+        if session_db is None:
+            return CommandResult(True, "SessionDB not available.")
+        sessions = session_db.list_sessions(limit=20)
+        if not sessions:
+            return CommandResult(True, "No previous sessions found.")
+        lines = ["Recent sessions:"]
+        for item in sessions:
+            sid = item["id"]
+            lines.append(f"- {sid} ({item['message_count']} messages)")
+        lines.append("")
+        lines.append("Use /resume <session_id> to restore a session.")
+        return CommandResult(True, "\n".join(lines))
+
+    if len(parts) == 2:
+        return CommandResult(
+            handled=True,
+            output=f"Resuming session {parts[1]}...",
+            resume_session_id=parts[1],
+        )
+
+    return CommandResult(True, "Usage: /resume | /resume list | /resume <session_id>")
