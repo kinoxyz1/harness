@@ -16,8 +16,12 @@ SCHEMA: dict[str, Any] = {
     "name": "memory",
     "description": (
         "Save durable information to persistent memory. "
-        "Use target='user' for user preferences/profile; "
-        "use target='memory' for your own long-lived notes."
+        "WHEN TO SAVE: user shares a preference, you discover an environment fact, "
+        "you learn a convention. "
+        "TWO TARGETS: 'user' (who the user is — preferences, habits, role), "
+        "'memory' (your notes — project facts, design decisions, pitfalls). "
+        "ACTIONS: add, replace, remove. "
+        "Each entry should be self-contained and under 200 chars."
     ),
     "input_schema": {
         "type": "object",

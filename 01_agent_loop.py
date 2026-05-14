@@ -300,7 +300,7 @@ def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
 
 def create_engine(*, session_id: str | None = None) -> SessionEngine:
     renderer = RichRenderer(console)
-    tool_context = ToolUseContext(working_dir=”.”, max_turns=MAX_TURNS)
+    tool_context = ToolUseContext(working_dir=".", max_turns=MAX_TURNS)
     model_gateway = ModelGateway(AnthropicClient())
     return SessionEngine(
         model_gateway=model_gateway,
@@ -324,19 +324,19 @@ def main() -> None:
     engine = create_engine()
 
     # ── REPL 主循环 ─────────────────────────────────────────
-    console.print(“[bold green]Agent Loop 已启动。[/bold green] 输入 [dim]exit[/dim] 或 [dim]quit[/dim] 退出。\n”)
+    console.print("[bold green]Agent Loop 已启动。[/bold green] 输入 [dim]exit[/dim] 或 [dim]quit[/dim] 退出。\n")
     while True:
         try:
-            query = read_user_input(“>> “)
+            query = read_user_input(">> ")
             if query is None:
-                console.print(“\n[dim]再见！[/dim]”)
+                console.print("\n[dim]再见！[/dim]")
                 break
         except KeyboardInterrupt:
-            console.print(“\n[dim]再见！[/dim]”)
+            console.print("\n[dim]再见！[/dim]")
             break
 
-        if query.strip().lower() in (“exit”, “quit”):
-            console.print(“[dim]再见！[/dim]”)
+        if query.strip().lower() in ("exit", "quit"):
+            console.print("[dim]再见！[/dim]")
             break
 
         with RunAbortMonitor(sys.stdin, lambda: engine.request_cancel()):
