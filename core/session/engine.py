@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from core.memory.local_provider import LocalMemoryProvider
 from core.memory.store import MemoryStore
 from core.prompt.assembler import PromptAssembler
 from core.shared.config import (
@@ -94,6 +95,12 @@ class SessionEngine:
             sessions_dir=working_dir / ".harness" / "sessions",
         )
         self._state.session_db.ensure_session_row(self._state.session_id)
+
+        self._state.memory_provider = LocalMemoryProvider(
+            db_path=working_dir / ".harness" / "state.db",
+            sessions_dir=working_dir / ".harness" / "sessions",
+        )
+        self._state.memory_provider.initialize(self._state.session_id)
 
         self._store = SessionStore(self._state, working_dir=working_dir)
         self._offloader = ToolResultOffloader(
