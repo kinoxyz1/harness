@@ -48,9 +48,9 @@ Hermes-agent 的三层记忆架构（详见 [`hermes-agent/docs/memory-implement
 │  查询：FTS5 全文搜索、会话列表、session 链追踪                 │
 │  代码：core/session/db.py + core/session/serializer.py        │
 ├──────────────────────────────────────────────────────────────┤
-│  第三层：外部语义记忆 (Semantic Memory)                        │
+│  第三层：检索增强记忆 (Retrieval-Augmented Memory)             │
 │  存储：本地 TF-IDF 向量索引（sqlite3 实现）                    │
-│  时机：Turn 结束后异步写入，下一轮 prefetch 语义检索            │
+│  时机：Turn 结束后异步写入，下一轮 prefetch 关键词加权检索     │
 │  注入：<memory-context> 标签，ephemeral（不落盘）              │
 │  代码：core/memory/provider.py + core/memory/local_provider.py│
 ├──────────────────────────────────────────────────────────────┤
@@ -204,7 +204,7 @@ class SessionDB:
 
     # ── 写入 ────────────────────────────────
     def save_session_snapshot(self, session_id: str, state_dict: dict) -> None:
-        """Turn 结束时保存完整 SessionState 快照到 JSON。"""
+        """保存完整 SessionState 快照到 JSON。被工具执行后（崩溃兜底）和 Turn 结束时调用。"""
 
     def append_messages(self, session_id: str, messages: list[dict]) -> None:
         """Turn 结束时增量追加新消息到 SQLite。"""
@@ -254,13 +254,27 @@ CREATE TABLE messages (
     timestamp REAL NOT NULL
 );
 
--- FTS5 全文搜索虚拟表
+-- FTS5 全文搜索虚拟表（外部内容模式，需触发器同步索引）
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     content,
     content='messages',
     content_rowid='id',
     tokenize='unicode61'              -- 支持中文
 );
+
+-- FTS5 索引同步触发器（缺少这些触发器会导致 FTS 索引始终为空）
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES('delete', old.id, old.content);
+END;
+CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES('delete', old.id, old.content);
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
 ```
 
 **WAL 模式 + 事务管理：**
@@ -291,6 +305,11 @@ def _execute_write(self, fn):
 文件路径：`.harness/sessions/{session_id}/state.json`
 
 包含完整的 `SessionState` 序列化数据。每次工具调用后全量覆盖（崩溃兜底），Turn 结束时最终覆盖。
+
+**性能考量：** 一个 Turn 中可能调用 10+ 次工具，每次全量覆盖 JSON 有 I/O 开销。优化策略：
+- `SessionState` 的 JSON 通常 < 100KB（对话历史是主要体积来源），写入耗时 < 5ms
+- 如果未来体积增长，可改为计数器模式：每 N 次工具调用保存一次，Turn 结束时强制保存
+- 当前阶段不过早优化，保持"每次调用后保存"的简单策略
 
 ### 5.4 落盘时序
 
@@ -333,16 +352,18 @@ _last_flushed_idx: int = 0   # SQLite 写入游标（MUST persist：恢复后需
 
 ---
 
-## 6. 第三层：外部语义记忆
+## 6. 第三层：检索增强记忆
 
 ### 6.1 设计定位
 
 第三层是**可选增强**。它在第一层（容量有限、手动写入）之外提供：
-- 语义搜索（不是关键词匹配，而是理解含义）
-- 自动事实提取（不需要 Agent 手动"记住这个"）
+- 关键词加权检索（TF-IDF，比精确匹配更灵活，但不是真正的语义理解）
+- 自动对话存储（每个 Turn 的对话内容自动存入索引）
 - 无限容量（不受 2200 字符限制）
 
-为了保持最小依赖，使用 TF-IDF + `sqlite3` 实现本地语义检索，不引入 chromadb。
+**TF-IDF 的局限：** TF-IDF 本质是词频统计，不理解语义。"部署"和"发布"的 TF-IDF 相似度为 0。它比 FTS5 的精确匹配更灵活（考虑了词频权重），但比 embedding 级语义搜索弱得多。教学项目的选择理由：零外部依赖 + 实现简单（~30 行）。学习者可以后续替换为真正的 embedding 方案。
+
+为了保持最小依赖，使用 TF-IDF + `sqlite3` 实现本地检索，不引入 chromadb。
 
 ### 6.2 MemoryProvider 抽象基类
 
@@ -352,7 +373,7 @@ _last_flushed_idx: int = 0   # SQLite 写入游标（MUST persist：恢复后需
 from abc import ABC, abstractmethod
 
 class MemoryProvider(ABC):
-    """第三层：外部语义记忆的抽象接口。"""
+    """第三层：检索增强记忆的抽象接口。"""
 
     @property
     @abstractmethod
@@ -415,10 +436,14 @@ class NoopProvider(MemoryProvider):
 
 ```python
 class LocalSemanticProvider(MemoryProvider):
-    """基于 TF-IDF + sqlite3 的本地语义记忆。
+    """基于 TF-IDF + sqlite3 的本地检索增强记忆。
 
     不依赖任何外部库。使用 sklearn 风格的 TF-IDF 权重计算
     （手写实现，约 30 行），配合 sqlite3 存储。
+
+    注意：TF-IDF 是词频统计，不是语义理解。搜"部署"无法找到"发布"。
+    对短文本（记忆条目、对话摘要）效果尚可，但对语义相似但用词不同的
+    内容召回能力有限。
     """
 
     def __init__(self, db_path: Path): ...
@@ -453,7 +478,18 @@ Turn 开始：
 构建 API 消息：
   api_messages = view.messages.copy()   # 副本
   if ext_result:
-      api_messages[-1]["content"] += "\n" + build_memory_context_block(ext_result)
+      memory_block = build_memory_context_block(ext_result)
+      # 安全方式：找到最后一条 user 消息，追加到其 content 后面
+      # 如果最后一条不是 user（比如是 tool result），则插入一条独立的 user 消息
+      last_user_idx = None
+      for i in range(len(api_messages) - 1, -1, -1):
+          if api_messages[i].get("role") == "user":
+              last_user_idx = i
+              break
+      if last_user_idx is not None:
+          api_messages[last_user_idx]["content"] += "\n" + memory_block
+      else:
+          api_messages.append({"role": "user", "content": memory_block})
 
   → api_messages 发给 LLM API
   → 原始 session_state.conversation_messages 不变
@@ -632,36 +668,38 @@ class SessionEngine:
         流程：
         1. 读取 .harness/sessions/{session_id}/state.json
         2. SessionSerializer.deserialize() 反序列化
-        3. 返回重建后的 SessionState
+        3. 重建所有 RUNTIME 组件
+        4. 返回重建后的 SessionState
         """
         snapshot_path = Path(f".harness/sessions/{session_id}/state.json")
         if not snapshot_path.exists():
             raise FileNotFoundError(f"Session {session_id} not found")
         data = json.loads(snapshot_path.read_text(encoding="utf-8"))
         state = SessionSerializer.deserialize(data)
-        # 重建 memory_store（独立于序列化）
+
+        # 重建 RUNTIME 组件（不参与序列化）
         state.memory_store = MemoryStore()
         state.memory_store.load_from_disk()
+        state.session_db = SessionDB(Path(".harness/state.db"))
+        state.memory_provider = create_memory_provider()  # 根据 env 配置
+        state.memory_provider.initialize(session_id=session_id)
         return state
 ```
 
 `01_agent_loop.py` 的改造：
 
 ```python
-# /resume 触发时，在 REPL 循环中重建整个 Engine
-def handle_input(raw: str, engine_ref: list) -> bool:
-    """engine_ref[0] 持有当前 Engine 实例，用 list 包装以便原地替换。"""
+# handle_input 返回 (should_continue, resume_session_id)
+def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
     text = _strip_surrogate_codepoints(raw).strip()
     if is_resume_command(text):
-        result = execute_resume_command(text, session_db=engine_ref[0].state.session_db)
-        if result.needs_restart:
-            # 销毁旧 Engine，创建新 Engine
-            engine_ref[0] = create_engine(session_id=result.session_id)
-        else:
-            console.print(result.output)
-        return True
+        result = execute_resume_command(text, session_db=engine.state.session_db)
+        return True, result.session_id  # 非 None 表示需要重建
     ...
+    return True, None
 ```
+
+REPL 主循环中检查返回值，若 `resume_session_id` 非 None 则重建整个 Engine（见 7.5 完整示例）。
 
 ### 7.5 /resume 命令处理
 
@@ -683,19 +721,26 @@ def execute_resume_command(raw: str, *, session_db: SessionDB) -> CommandResult:
 
 **`01_agent_loop.py` 的 REPL 循环改造：**
 
+与 7.4 一致，使用 `engine_ref: list` 包装模式实现原地替换（`engine` 是局部变量，直接赋值无法传递到外层 REPL 循环）：
+
 ```python
-# handle_input 新增分流
-def handle_input(raw: str, engine: SessionEngine) -> bool:
+# handle_input 返回 (continue, session_id_if_resume)
+def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
     text = _strip_surrogate_codepoints(raw).strip()
-    if is_skills_command(text):
-        ...
     if is_resume_command(text):
-        result = engine.handle_resume_command(text)
-        if result.needs_restart:
-            # 用恢复的 session_id 重建 Engine
-            engine = create_engine(session_id=result.session_id)
-        return True
+        result = execute_resume_command(text, session_db=engine.state.session_db)
+        return True, result.session_id   # 非 None 表示需要重建 Engine
     ...
+    return True, None
+
+# REPL 主循环
+while True:
+    query = read_user_input(">> ")
+    ...
+    with RunAbortMonitor(...):
+        should_continue, resume_session_id = handle_input(query, engine)
+        if resume_session_id:
+            engine = create_engine(session_id=resume_session_id)  # 重建 Engine
 ```
 
 ### 7.6 压缩后的 session 链追踪
@@ -712,9 +757,109 @@ Session B (压缩后续会话)
   → 拼接两个 session 的消息（A 的摘要 + B 的完整消息）
 ```
 
+**拼接策略细节：**
+
+```
+1. 摘要来源：CompactService.summarize_and_compact() 产出的摘要消息。
+   摘要本身作为 Session A 的最后一条 assistant 消息存入 SQLite。
+
+2. 链的拼接顺序：按 parent_session_id 从根到尾。
+   get_session_chain("def456") → ["abc123", "def456"]
+   → 从 "abc123" 读取消息（含摘要）
+   → 追加 "def456" 的消息
+   → 结果：[...原始消息..., 摘要, ...续会话消息...]
+
+3. 长链性能：每个 session 独立查询，链长 N 则 N 次 SQL 查询。
+   实际场景中链很少超过 3-4（每次压缩生成一个新 session）。
+   如果链 > 5，只取最近的 3 个 session（防止 context 爆炸）。
+
+4. 时间戳连续性：每个 session 的消息有自己的 timestamp。
+   拼接后按 timestamp 排序，保证时间线正确。
+   Session B 的消息的 timestamp 一定晚于 Session A 的。
+```
+
 ---
 
-## 8. 文件布局汇总
+## 8. 约束与假设
+
+### 8.1 单实例约束
+
+**设计假设：同一时间只有一个 Harness 进程操作一个项目目录。**
+
+原因：
+- 第一层：`fcntl.flock` 保护单文件写入，但 read-modify-write 序列不是事务性的。两个进程同时写入 MEMORY.md 可能导致其中一个的修改被覆盖（经典 lost update）。
+- 第二层：SQLite WAL 模式支持多读者但写者仍然串行。两个进程的写入会互相阻塞（重试机制可以缓解但不能消除）。
+- 第三层：`_prefetch_result` 缓存是进程内的，多进程无法共享。
+
+如果未来需要多实例支持，需要引入 advisory lock 或 central coordinator。
+
+### 8.2 字符上限的来源
+
+```
+MEMORY.md: 2200 字符 ≈ 800 tokens（按 1 token ≈ 2.7 字符估算）
+USER.md:   1375 字符 ≈ 500 tokens
+
+预算依据：
+  system prompt 中为记忆分配的总预算 ≈ 1300 tokens
+  这个预算确保记忆注入不会显著压缩对话空间（典型 context window 128k tokens）
+  两个上限之和（1300 tokens）约占 context window 的 1%，开销可控
+```
+
+### 8.3 数据生命周期
+
+**问题：** `.harness/sessions/` 目录下的 JSON 快照和 SQLite 数据库会无限增长。
+
+**策略：**
+
+```
+自动清理（在 SessionDB 初始化时执行）：
+  - 保留最近 100 个会话
+  - 超过 30 天的会话自动归档（JSON 移至 .harness/sessions/archive/）
+  - 归档会话的 SQLite 消息保留，但标记为 archived
+  - 归档超过 90 天的会话从 SQLite 删除
+
+手动清理：
+  /resume cleanup          # 清理过期会话
+  /resume cleanup --all    # 清理所有已完成会话（保留当前）
+
+VACUUM 时机：
+  - 每次清理后执行 PRAGMA incremental_vacuum
+  - 不执行完整 VACUUM（需要独占锁，可能阻塞）
+```
+
+### 8.4 Schema 迁移
+
+SQLite 表结构可能随版本变更。迁移策略：
+
+```python
+# SessionDB.__init__ 中检查 schema 版本
+def _ensure_schema(self):
+    version = self._conn.execute(
+        "SELECT value FROM metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    current = int(version[0]) if version else 0
+
+    if current < 1:
+        self._create_tables_v1()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '1')"
+        )
+
+def _create_tables_v1(self):
+    """创建 v1 表结构。"""
+    self._conn.executescript("""
+        CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS sessions (...);
+        CREATE TABLE IF NOT EXISTS messages (...);
+        -- FTS5 + triggers
+    """)
+```
+
+未来版本变更时，新增 `_migrate_v1_to_v2()` 等方法，在 `_ensure_schema()` 中按序执行。
+
+---
+
+## 9. 文件布局汇总
 
 新增/修改的文件：
 
@@ -848,7 +993,7 @@ Phase 5：第三层（~200 行）
 | Memory Nudge 后台审查 | 每 N 轮启动 mini agent 审查 | **砍掉。** 靠 memory 工具 + Agent 自觉 |
 | Provider 插件系统 | 8 个插件 + 插件发现 + curses 配置向导 | **砍掉。** 只有 NoopProvider + 一个 LocalProvider |
 | Provider 数量 | 同一时间只能激活 1 个外部 provider | 同上，1 个 |
-| 第三层向量检索 | ChromaDB（外部依赖） | TF-IDF + sqlite3（标准库） |
+| 第三层向量检索 | ChromaDB（外部依赖） | TF-IDF + sqlite3（标准库，关键词加权而非语义） |
 | SessionDB 并发 | 15 次重试 + 详细锁竞争处理 | 10 次重试（简化） |
 | 压缩模型 | 可用便宜模型做摘要 | 复用主模型（简化） |
 | /resume | 完整 CLI 命令系统 | 简单的 /resume list + /resume <id> |
@@ -888,3 +1033,76 @@ Phase 5：第三层（~200 行）
 - prefetch 缓存的预热和消费
 - Ephemeral 注入不落盘
 - 失败静默（provider 异常不影响主流程）
+
+## QA: 按上述设计, harness 项目会用越聪明吗
+```bash
+好问题。直说：会更好用，但不会更聪明。                                                                                              
+                                                                                                                                    
+  实际效果分析                                
+                                                                                                                                    
+  会有的改善                                                                                                                        
+                                                                                                                                      
+  第一层（身份记忆）：          
+    ✅ 新会话不用重复说"用中文回答""项目用 pytest"                                                                                     
+    ✅ Agent 记住你的工作习惯、项目结构、踩过的坑                                                                                      
+    ✅ 体验从"每次重新认识"变成"老朋友"             
+                                                                                                                                      
+  第二层（对话持久化 + /resume）：                                                                                                    
+    ✅ 中断后可以恢复，长任务不丢进度     
+    ✅ 历史对话可搜索（"我上次那个排序代码呢"）                                                                                        
+    ✅ 不会再因为 Ctrl-C 丢失半天工作         )                                                                                      
+                                                                                                                                      
+  第三层（语义记忆）：                                                                                                                
+    ✅ 相关的历史上下文会自动浮现                                                                                                      
+    ✅ 第一层装不下的信息可以靠搜索补回  )                                                                                             
+                                                                                                                                      
+  不会有的改善                                                                             
+                                                                                                                                    
+  第一层容量极小：                                                                                                                  
+    MEMORY.md 2200 字符 ≈ 10-15 条事实
+    USER.md 1375 字符 ≈ 5-8 条偏好
+    → 超限后 Agent 要自己决定删旧存新
+    → 不是"越用越丰富"，而是"始终只有最关键的十几条"
+
+  第二层是被动存储：                          
+    对话存下来了，但 Agent 不会主动从历史中学习
+    → 不会因为上次犯过错就避免再犯       
+    → 不会因为上次的方案好就复用                                                                                                      
+                            
+  第三层 TF-IDF 很弱：                                                                                                                
+    TF-IDF 本质是"关键词加权匹配"，不是"理解含义"                                         
+    → 搜"排序"能找到提到"quicksort"的对话（共享关键词）
+    → 但搜"性能优化"找不到"把 O(n²) 改成 O(n log n)"的那次（语义不同，关键词不同）                                                  
+    → 真正的语义搜索需要 embedding 模型
+                                
+  没有自动事实提取（Memory Nudge 砍掉了）：
+    → Agent 不会自动从对话中提取"这个项目用 Next.js"
+    → 必须主动调用 memory 工具            
+    → 而 LLM 经常忘记调用 
+                                                                                                                                      
+  用个比喻          
+                                                                                                                                      
+  现在（无记忆）：                                                                        
+    每次见面 = 初次见面的陌生人          
+                                                                                                                                    
+  有了三层记忆后：                            
+    每次见面 = 有个小本子的熟人           
+    → 小本子记了你的名字和习惯（第一层）
+    → 过去的聊天记录都存着，可以翻（第二层）                                                                                          
+    → 偶尔能翻到相关内容（第三层）
+    → 但他的脑子（LLM）没变，推理能力没有提升                                                                                         
+                                                                                          
+  真正的"越用越聪明"需要：               
+    → 自动从每次对话中提取经验教训                                                                                                  
+    → 把经验转化为更好的推理策略
+    → 这是 learning loop，不是 memory system
+    → 目前没有任何开源 Agent 真正做到了这一点
+                             
+  诚实结论                      
+
+  这个设计解决的是连续性问题（不遗忘、不丢失），不是能力增长问题（更聪明）。它让 Agent
+  从"每次重来"变成"有记忆的助手"，但智力上限仍然取决于底层 LLM。
+                            
+  想要"越用越聪明"，需要额外的东西——比如 Hermes 的 Memory Nudge（自动提取事实）、embedding 级语义检索、甚至 RL-based                  
+  经验积累——但这些都不在这个设计范围内（教学优先 + 最小依赖的权衡）。
+```
