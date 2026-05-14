@@ -112,3 +112,9 @@ class SessionState:
     queries_since_skill_activation: int = 0
     last_known_skill_keys: set[str] = field(default_factory=set)
     skill_relevance_cooldown: dict[str, int] = field(default_factory=dict)
+
+    # ── memory / persistence ──────────────────────────────
+    memory_store: Any = None
+    session_db: Any = None
+    memory_provider: Any = None
+    _last_flushed_idx: int = 0
