@@ -21,7 +21,7 @@ class FakeEngine:
 
     def submit_user_message(self, text: str):
         self.messages.append(text)
-        return SimpleNamespace(final_output="reply")
+        return SimpleNamespace(final_output="reply", streaming_displayed=False)
 
 
 def test_cli_routes_skills_command_to_handle_command():
