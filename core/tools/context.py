@@ -26,6 +26,7 @@ class SessionUpdateKind(str, Enum):
     UPSERT_FILE_STATE = "upsert_file_state"
     INVALIDATE_FILE_STATE = "invalidate_file_state"
     APPEND_SKILL_EVENT = "append_skill_event"
+    MEMORY_WRITE = "memory_write"
 
 
 class RunUpdateKind(str, Enum):

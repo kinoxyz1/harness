@@ -45,6 +45,16 @@ def apply_session_update(session_state, update: SessionUpdate) -> None:
             session_state.skill_events.append(skill_event)
         return
 
+    if update.kind == SessionUpdateKind.MEMORY_WRITE:
+        provider = getattr(session_state, "memory_provider", None)
+        if provider is not None:
+            provider.on_memory_write(
+                action=str(payload.get("action", "")),
+                target=str(payload.get("target", "")),
+                content=str(payload.get("content", "")),
+            )
+        return
+
     raise ValueError(f"Unsupported session update kind: {update.kind}")
 
 
