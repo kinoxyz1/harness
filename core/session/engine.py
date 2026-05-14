@@ -12,9 +12,11 @@ Bootstrap 是幂等的：多次调用只执行一次，且不向 transcript 写�
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
+from core.memory.store import MemoryStore
 from core.prompt.assembler import PromptAssembler
 from core.shared.config import (
     BASH_RESULT_PERSIST_THRESHOLD,
@@ -25,8 +27,10 @@ from core.shared.config import (
 )
 from core.query.loop import QueryLoop
 from core.session.commands import execute_skills_command
+from core.session.db import SessionDB
 from core.session.governor import ContextGovernor
 from core.session.offloader import ToolResultOffloader
+from core.session.serializer import SessionSerializer
 from core.session.state import SessionState
 from core.session.store import SessionStore
 from core.session.view_builder import MessageViewBuilder
@@ -58,6 +62,7 @@ class SessionEngine:
         skill_registry=None,
         tools=None,
         renderer=None,
+        session_id: str | None = None,
     ):
         """
         Args:
@@ -72,9 +77,24 @@ class SessionEngine:
             skill_registry: Skill 注册器，默认创建 SkillRegistry()。
             tools: 可用工具 schema 列表，传给 MessageViewBuilder。
             renderer: UI 渲染器，可选。
+            session_id: 可选的 session ID，用于恢复已有会话。
         """
-        self._state = SessionState(conversation_messages=[])
         working_dir = Path(getattr(tool_context, "working_dir", "."))
+
+        if session_id:
+            self._state = self._load_session(session_id, working_dir)
+        else:
+            self._state = SessionState(conversation_messages=[])
+
+        self._state.memory_store = MemoryStore(base_dir=working_dir)
+        self._state.memory_store.load_from_disk()
+
+        self._state.session_db = SessionDB(
+            db_path=working_dir / ".harness" / "state.db",
+            sessions_dir=working_dir / ".harness" / "sessions",
+        )
+        self._state.session_db.ensure_session_row(self._state.session_id)
+
         self._store = SessionStore(self._state, working_dir=working_dir)
         self._offloader = ToolResultOffloader(
             tool_result_dir=self._store.tool_result_dir,
@@ -191,3 +211,27 @@ class SessionEngine:
     def request_cancel(self) -> None:
         if self._tool_context is not None and hasattr(self._tool_context, "_cancel"):
             self._tool_context._cancel()
+
+    def _load_session(self, session_id: str, working_dir: Path) -> SessionState:
+        snapshot_path = working_dir / ".harness" / "sessions" / session_id / "state.json"
+        if snapshot_path.is_file():
+            raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            state = SessionSerializer.deserialize(raw)
+            state.session_id = session_id
+        else:
+            db = SessionDB(
+                db_path=working_dir / ".harness" / "state.db",
+                sessions_dir=working_dir / ".harness" / "sessions",
+            )
+            state = SessionState(
+                conversation_messages=db.get_messages(session_id),
+                session_id=session_id,
+            )
+
+        stale_paths = []
+        for path in state.read_file_state:
+            if not Path(path).exists():
+                stale_paths.append(path)
+        for path in stale_paths:
+            state.read_file_state.pop(path, None)
+        return state

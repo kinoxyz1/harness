@@ -204,6 +204,39 @@ class QueryLoop:
     - recovery: 处理模型空响应等异常
     """
 
+    def _persist_state(self, session_state, store, *, usage: dict[str, int] | None = None) -> None:
+        db = getattr(session_state, "session_db", None)
+        if db is None:
+            return
+
+        all_messages = store.snapshot()
+        flushed = int(getattr(session_state, "_last_flushed_idx", 0))
+        if len(all_messages) > flushed:
+            new_messages = all_messages[flushed:]
+            try:
+                db.append_messages(session_state.session_id, new_messages)
+                session_state._last_flushed_idx = len(all_messages)
+            except Exception:
+                pass
+
+        if usage:
+            try:
+                db.update_token_counts(
+                    session_state.session_id,
+                    int(usage.get("input_tokens", 0)),
+                    int(usage.get("output_tokens", 0)),
+                )
+            except Exception:
+                pass
+
+        try:
+            from core.session.serializer import SessionSerializer
+
+            state_dict = SessionSerializer.serialize(session_state)
+            db.save_session_snapshot(session_state.session_id, state_dict)
+        except Exception:
+            pass
+
     def run(
         self,
         *,
@@ -348,6 +381,7 @@ class QueryLoop:
                 except RequestCancelledError:
                     if renderer is not None and hasattr(renderer, "show_status"):
                         renderer.show_status("已取消当前运行。")
+                    self._persist_state(session_state, store)
                     return QueryResult(
                         final_output="已取消当前运行。",
                         stop_reason=StopReason.ABORTED,
@@ -427,6 +461,7 @@ class QueryLoop:
                     state.reactive_recovery_attempted = True
                     continue
                 except RequestCancelledError:
+                    self._persist_state(session_state, store)
                     return QueryResult(
                         final_output="已取消当前运行。",
                         stop_reason=StopReason.ABORTED,
@@ -516,6 +551,7 @@ class QueryLoop:
                             )
                     persisted_messages.append(rewritten)
                 store.extend(persisted_messages)
+                self._persist_state(session_state, store)
                 state.turn_count += 1
                 state.tool_calls_executed += len(parsed_calls)
                 apply_transition(state, TransitionReason.NEXT_TURN)
@@ -539,6 +575,22 @@ class QueryLoop:
 
             # ── 分支 C：模型输出最终文本 → 正常完成 ────────────────
             if model_resp.has_final_text:
+                provider = getattr(session_state, "memory_provider", None)
+                if provider is not None and user_message_content:
+                    try:
+                        provider.sync_turn(user_message_content, model_resp.content)
+                        provider.queue_prefetch(user_message_content)
+                    except Exception:
+                        pass
+
+                self._persist_state(
+                    session_state,
+                    store,
+                    usage={
+                        "input_tokens": getattr(model_resp, "prompt_tokens", 0),
+                        "output_tokens": getattr(model_resp, "completion_tokens", 0),
+                    },
+                )
                 return QueryResult(
                     final_output=model_resp.content,
                     stop_reason=StopReason.MAX_TURNS if state.stop_reason == "max_turns" else StopReason.COMPLETED,

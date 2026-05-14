@@ -48,7 +48,7 @@ from core.policy.skill_relevance import SkillRelevancePolicy
 from core.policy.skill_usage_nudge import SkillUsageNudgePolicy
 from core.query.recovery import RecoveryManager
 from core.ui.renderer import RichRenderer, render_markdown
-from core.session.commands import is_skills_command
+from core.session.commands import is_resume_command, is_skills_command, execute_resume_command
 from core.session.engine import SessionEngine
 from core.session.view_builder import MessageViewBuilder
 from core.tools import registry
@@ -268,11 +268,12 @@ def read_user_input(prompt: str = ">> ") -> str | None:
     return TerminalLineEditor(sys.stdin, sys.stdout).readline(prompt)
 
 
-def handle_input(raw: str, engine: SessionEngine) -> bool:
-    """处理一行用户输入。返回 True 继续，False 退出。
+def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
+    """处理一行用户输入。返回 (continue, resume_session_id)。
 
     分流逻辑：
     - /skills 命令 → 直接在 engine 层处理，不进 QueryLoop
+    - /resume 命令 → 列出或恢复已有会话
     - 普通文本 → 进入 QueryLoop 的完整 think-act 循环
     """
     # macOS CJK 输入法删除字符时可能留下 partial UTF-8 字节，
@@ -280,31 +281,28 @@ def handle_input(raw: str, engine: SessionEngine) -> bool:
     # 导致 Anthropic SDK JSON 序列化崩溃。在此清除。
     text = _strip_surrogate_codepoints(raw).strip()
     if not text:
-        return True
+        return True, None
     if is_skills_command(text):
         output = engine.handle_command(text)
         if output:
             console.print(output)
-        return True
+        return True, None
+    if is_resume_command(text):
+        result = execute_resume_command(text, session_db=engine.state.session_db)
+        if result.output:
+            console.print(result.output)
+        return True, result.resume_session_id
     result = engine.submit_user_message(text)
     if result.final_output and not result.streaming_displayed:
         render_markdown(console, result.final_output)
-    return True
+    return True, None
 
 
-def main() -> None:
-    # ── UI 层 ──────────────────────────────────────────────
+def create_engine(*, session_id: str | None = None) -> SessionEngine:
     renderer = RichRenderer(console)
-
-    # ── 工具层 ─────────────────────────────────────────────
-    # ToolUseContext: 工具执行的运行时环境（工作目录、文件状态缓存等）
-    tool_context = ToolUseContext(working_dir=".", max_turns=MAX_TURNS)
-
-    # ── 组装 Engine（所有组件的唯一协调者）──────────────────
-    # Engine 持有 SessionState，其他组件通过 Engine 间接共享状态
+    tool_context = ToolUseContext(working_dir=”.”, max_turns=MAX_TURNS)
     model_gateway = ModelGateway(AnthropicClient())
-
-    engine = SessionEngine(
+    return SessionEngine(
         model_gateway=model_gateway,
         tool_runtime=ToolExecutorRuntime(registry, tool_context, renderer=renderer),
         tool_context=tool_context,
@@ -316,32 +314,35 @@ def main() -> None:
             SkillUsageNudgePolicy(),
         ]),
         recovery=RecoveryManager(),
-        tools=registry.schemas(),     # 工具的 JSON schema，传给 API 让模型知道可以调什么
+        tools=registry.schemas(),
         renderer=renderer,
+        session_id=session_id,
     )
 
+
+def main() -> None:
+    engine = create_engine()
+
     # ── REPL 主循环 ─────────────────────────────────────────
-    # 注意：不使用 input()/sys.stdin.readline() 的默认行编辑。
-    # 默认终端 cooked mode 不会保护提示符，并且回删是按终端列宽工作，
-    # 遇到 CJK 宽字符时容易出现“删一个字要按两次”以及把 `>> ` 一起删掉。
-    # 这里使用应用层行编辑，按 Unicode 字符维护缓冲区，再整体重绘一行。
-    console.print("[bold green]Agent Loop 已启动。[/bold green] 输入 [dim]exit[/dim] 或 [dim]quit[/dim] 退出。\n")
+    console.print(“[bold green]Agent Loop 已启动。[/bold green] 输入 [dim]exit[/dim] 或 [dim]quit[/dim] 退出。\n”)
     while True:
         try:
-            query = read_user_input(">> ")
+            query = read_user_input(“>> “)
             if query is None:
-                console.print("\n[dim]再见！[/dim]")
+                console.print(“\n[dim]再见！[/dim]”)
                 break
         except KeyboardInterrupt:
-            console.print("\n[dim]再见！[/dim]")
+            console.print(“\n[dim]再见！[/dim]”)
             break
 
-        if query.strip().lower() in ("exit", "quit"):
-            console.print("[dim]再见！[/dim]")
+        if query.strip().lower() in (“exit”, “quit”):
+            console.print(“[dim]再见！[/dim]”)
             break
 
         with RunAbortMonitor(sys.stdin, lambda: engine.request_cancel()):
-            handle_input(query, engine)
+            should_continue, resume_session_id = handle_input(query, engine)
+            if resume_session_id:
+                engine = create_engine(session_id=resume_session_id)
         print()
 
 

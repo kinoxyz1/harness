@@ -29,7 +29,15 @@ def _stable_cache_key(state: SessionState, *, project_root: str | None = None) -
     system_prompt = get_system_context(project_root=project_root)
     digest = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
     revision = state.skills_revision or "no-skills"
-    return f"stable_system_prompt:{revision}:{digest}"
+    memory_fp = "no-memory"
+    if state.memory_store is not None:
+        memory_blob = (
+            state.memory_store.format_for_prompt("memory")
+            + "\n"
+            + state.memory_store.format_for_prompt("user")
+        )
+        memory_fp = hashlib.sha256(memory_blob.encode("utf-8")).hexdigest()[:8]
+    return f"stable_system_prompt:{revision}:{digest}:{memory_fp}"
 
 
 def _render_skill_catalog(state: SessionState) -> str:
@@ -89,6 +97,17 @@ def _render_task_state(task_state: TaskState) -> str:
         )
     lines.append("</task-state>")
     return "\n".join(lines)
+
+
+def build_memory_context_block(raw_context: str) -> str:
+    if not raw_context or not raw_context.strip():
+        return ""
+    return (
+        "<memory-context>\n"
+        "[System note: recalled memory context, not new user input.]\n\n"
+        f"{raw_context}\n"
+        "</memory-context>"
+    )
 
 
 def _render_file_runtime(read_file_state: dict[str, Any], *, char_budget: int) -> str:
@@ -175,7 +194,15 @@ class PromptAssembler:
             parts.append(catalog)
         if state.system_prompt_override:
             parts.append(state.system_prompt_override)
-        stable_prompt = "\n\n".join(parts)
+        if state.memory_store is not None:
+            memory_text = state.memory_store.format_for_prompt("memory")
+            user_text = state.memory_store.format_for_prompt("user")
+            if memory_text:
+                parts.append(memory_text)
+            if user_text:
+                parts.append(user_text)
+
+        stable_prompt = "\n\n".join(part for part in parts if part)
         return self._cache.set(state.prompt_cache, cache_key, stable_prompt)
 
     def build_active_skill_messages(self, state: SessionState) -> list[dict[str, str]]:
@@ -341,4 +368,19 @@ class PromptAssembler:
         state: SessionState,
         run_state: RunState,
     ) -> list[ContextBlock]:
-        return []
+        provider = getattr(state, "memory_provider", None)
+        if provider is None:
+            return []
+        query = state.user_intents[-1] if state.user_intents else ""
+        recalled = provider.prefetch(query)
+        block = build_memory_context_block(recalled)
+        if not block:
+            return []
+        return [
+            ContextBlock(
+                kind="memory_context",
+                content=block,
+                required=False,
+                token_estimate=_estimate_block_tokens(block),
+            )
+        ]
