@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.text import Text
 
 from core.query.reducers import apply_run_update, apply_session_update
 from core.query.state import RunState
@@ -156,6 +158,51 @@ def test_runtime_compact_mode_reports_long_running_status_once(monkeypatch) -> N
     ])
 
     assert renderer.status_calls == ["bash 执行中... 2s"]
+
+
+def test_runtime_compact_mode_reports_long_running_status_repeatedly(monkeypatch) -> None:
+    class FakeThread:
+        def __init__(self, *, target) -> None:
+            self._target = target
+            self._polls = 0
+
+        def start(self) -> None:
+            self._target()
+
+        def join(self, timeout=None) -> None:
+            self._polls += 1
+
+        def is_alive(self) -> bool:
+            return self._polls < 7
+
+    time_values = [100.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 106.2]
+    time_index = {"value": 0}
+
+    def fake_time() -> float:
+        idx = time_index["value"]
+        time_index["value"] += 1
+        return time_values[min(idx, len(time_values) - 1)]
+
+    monkeypatch.setattr(runtime_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(runtime_mod.time, "time", fake_time)
+
+    renderer = FakeRenderer()
+    runtime = ToolExecutorRuntime(
+        FakeWriteRegistry(),
+        ToolUseContext(working_dir=".", max_turns=5),
+        display=RunDisplayOptions(),
+        renderer=renderer,
+    )
+
+    _execute_batch(runtime, [
+        ToolCall(idx=0, name="bash", call_id="call_1", args={"command": "echo ok"})
+    ])
+
+    assert renderer.status_calls == [
+        "bash 执行中... 2s",
+        "bash 执行中... 4s",
+        "bash 执行中... 6s",
+    ]
 
 
 def test_runtime_compact_mode_skips_generic_todo_events_after_query_loop_migration(tmp_path) -> None:
@@ -391,6 +438,22 @@ def test_renderer_accumulates_thinking_and_content_during_stream() -> None:
     # The final formatted output (Panel + markdown) comes from show_thinking/show_assistant
 
 
+def test_renderer_keeps_streamed_thinking_and_content_after_end_stream() -> None:
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("thinking_delta", "turn-1", 1, "model", "live", {"text": "先加载 weather skill。"}))
+    renderer.consume_event(make_event("content_delta", "turn-1", 2, "model", "live", {"text": "最终回答"}))
+    renderer.end_stream("turn-1", {})
+
+    output = console.export_text()
+    assert "先加载 weather skill。" in output
+    assert "最终回答" in output
+
+
 def test_renderer_flushes_and_renders_tool_event_during_stream() -> None:
     from core.shared.stream_events import make_event
 
@@ -414,3 +477,92 @@ def test_renderer_flushes_and_renders_tool_event_during_stream() -> None:
     output = console.export_text()
     # Tool call is rendered via show_tool_call (not transient)
     assert "$ Read(" in output
+
+
+def test_renderer_flushes_first_thinking_delta_immediately(monkeypatch) -> None:
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+    updates: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("core.ui.renderer.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        renderer,
+        "_update_stream_display",
+        lambda: updates.append((renderer._thinking_text, renderer._content_text)),
+    )
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("thinking_delta", "turn-1", 1, "model", "live", {"text": "先想"}))
+
+    assert updates == [("先想", "")]
+
+
+def test_renderer_flushes_transition_from_thinking_to_content_immediately(monkeypatch) -> None:
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+    updates: list[tuple[str, str]] = []
+
+    monotonic_values = iter([100.0, 100.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr("core.ui.renderer.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        renderer,
+        "_update_stream_display",
+        lambda: updates.append((renderer._thinking_text, renderer._content_text)),
+    )
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("thinking_delta", "turn-1", 1, "model", "live", {"text": "先想"}))
+    renderer.consume_event(make_event("content_delta", "turn-1", 2, "model", "live", {"text": "再答"}))
+
+    assert updates == [("先想", ""), ("先想", "再答")]
+
+
+def test_renderer_flushes_every_content_delta_immediately(monkeypatch) -> None:
+    import time as pytime
+
+    from core.shared.stream_events import make_event
+
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+    updates: list[tuple[str, str]] = []
+
+    monkeypatch.setattr("core.ui.renderer.STREAMING_RENDER_FLUSH_MS", 20)
+    monkeypatch.setattr(
+        renderer,
+        "_update_stream_display",
+        lambda: updates.append((renderer._thinking_text, renderer._content_text)),
+    )
+
+    renderer.begin_stream("turn-1", {})
+    renderer.consume_event(make_event("content_delta", "turn-1", 1, "model", "live", {"text": "第一段"}))
+    renderer.consume_event(make_event("content_delta", "turn-1", 2, "model", "live", {"text": "第二段"}))
+    renderer.consume_event(make_event("content_delta", "turn-1", 3, "model", "live", {"text": "第三段"}))
+    pytime.sleep(0.08)
+    renderer.end_stream("turn-1", {})
+
+    assert updates[0] == ("", "第一段")
+    assert updates[-1] == ("", "第一段第二段第三段")
+    assert len(updates) >= 2
+
+
+def test_renderer_stream_display_uses_markdown_for_content(monkeypatch) -> None:
+    console = Console(record=True, force_terminal=False, width=120)
+    renderer = RichRenderer(console=console)
+    captured = {}
+
+    class FakeLive:
+        def update(self, renderable) -> None:
+            captured["renderable"] = renderable
+
+    renderer._stream_live = FakeLive()
+    renderer._tool_input_progress = 0
+    renderer._content_text = "# Title\n\n- item"
+
+    renderer._update_stream_display()
+
+    parts = list(getattr(captured["renderable"], "renderables", []))
+    assert any(isinstance(part, Markdown) for part in parts)

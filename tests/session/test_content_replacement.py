@@ -44,9 +44,9 @@ def test_reconstruct_content_replacement_state_freezes_seen_results() -> None:
     assert restored.replacements == {"toolu_big": "<persisted-output>saved</persisted-output>"}
 
 
-def test_session_store_creates_session_scoped_tool_result_dir(tmp_path: Path) -> None:
+def test_session_store_exposes_session_scoped_tool_result_dir_without_creating_it(tmp_path: Path) -> None:
     state = SessionState(conversation_messages=[], session_id="sess1234")
     store = SessionStore(state, working_dir=tmp_path)
 
     assert store.tool_result_dir == tmp_path / ".harness" / "sessions" / "sess1234" / "tool-results"
-    assert store.tool_result_dir.is_dir()
+    assert not store.tool_result_dir.exists()

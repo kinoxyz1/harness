@@ -36,7 +36,6 @@ class SessionStore:
             / state.session_id
             / "tool-results"
         )
-        self._tool_result_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def tool_result_dir(self) -> Path:

@@ -57,6 +57,9 @@ BASH_TIMEOUT: int = int(os.environ.get("BASH_TIMEOUT", "30"))
 # 单次 query 允许的最大工具调用轮次，防止无限循环
 MAX_TURNS: int = int(os.environ.get("AGENT_MAX_TURNS", "300"))
 
+# 每 N 个真实用户 turn 触发一次独立 memory review。设为 0 可关闭。
+MEMORY_REVIEW_INTERVAL: int = int(os.environ.get("MEMORY_REVIEW_INTERVAL", "1"))
+
 # 工具输出截断阈值（字符数），防止超大输出撑爆上下文
 MAX_OUTPUT_CHARS: int = int(os.environ.get("MAX_OUTPUT_CHARS", "100000"))
 

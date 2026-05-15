@@ -60,3 +60,16 @@ class TestSessionSerializerRoundTrip:
         data = {}
         restored = SessionSerializer.deserialize(data)
         assert restored.conversation_messages == []
+
+    def test_memory_review_counters_round_trip(self):
+        state = SessionState(conversation_messages=[])
+        state.user_turn_count = 7
+        state.turns_since_memory_review = 2
+        state.memory_review_interval = 3
+
+        data = SessionSerializer.serialize(state)
+        restored = SessionSerializer.deserialize(data)
+
+        assert restored.user_turn_count == 7
+        assert restored.turns_since_memory_review == 2
+        assert restored.memory_review_interval == 3

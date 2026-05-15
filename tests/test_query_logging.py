@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from core.policy.base import PolicyRunner
 from core.policy.todo_tracking import TodoPlanningPolicy
@@ -65,6 +66,16 @@ class FakeGovernor:
 class FakeOffloader:
     def maybe_persist(self, tool_use_id, content, *, tool_name):
         return content
+
+
+class RecordingModelGateway:
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict]] = []
+
+    def call_once(self, messages, *, system="", tools, request_options=None):
+        self.calls.append(list(messages))
+        return self._responses.pop(0)
 
 
 class FakeModelGateway:
@@ -148,6 +159,24 @@ class FakePromptAssembler:
         return []
 
 
+class StubMemoryProvider:
+    def __init__(self, recalled: str = "") -> None:
+        self.recalled = recalled
+        self.prefetch_calls: list[str] = []
+        self.sync_calls: list[tuple[str, str]] = []
+        self.queued_queries: list[str] = []
+
+    def prefetch(self, query: str) -> str:
+        self.prefetch_calls.append(query)
+        return self.recalled
+
+    def sync_turn(self, user_content: str, assistant_content: str) -> None:
+        self.sync_calls.append((user_content, assistant_content))
+
+    def queue_prefetch(self, query: str) -> None:
+        self.queued_queries.append(query)
+
+
 def test_query_loop_renders_reasoning_when_present() -> None:
     session_state = SessionState(conversation_messages=[])
     store = SessionStore(session_state)
@@ -171,6 +200,81 @@ def test_query_loop_renders_reasoning_when_present() -> None:
     assert result.stop_reason == StopReason.COMPLETED
     assert renderer.thinking_calls == [("思考过程", "reasoning trace")]
     assert session_state.compact_state["last_prompt_tokens"] == 321
+
+
+def test_query_loop_spawns_background_memory_review_after_completed_turn() -> None:
+    session_state = SessionState(conversation_messages=[])
+    session_state.memory_store = object()
+    session_state.memory_review_interval = 1
+    store = SessionStore(session_state)
+
+    with patch("core.query.loop.spawn_background_memory_review", return_value=True) as mock_spawn:
+        result = QueryLoop().run(
+            session_state=session_state,
+            store=store,
+            view_builder=FakeViewBuilder(),
+            prompt_assembler=FakePromptAssembler(),
+            model_gateway=FakeModelGateway(),
+            tool_runtime=object(),
+            tool_context=object(),
+            policy_runner=FakePolicyRunner(),
+            recovery=FakeRecovery(),
+            governor=FakeGovernor(),
+            offloader=FakeOffloader(),
+            user_message_content="请记住我喜欢 Python。",
+            tools=[],
+            renderer=None,
+        )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    mock_spawn.assert_called_once()
+
+
+def test_query_loop_injects_memory_context_into_api_copy_only(tmp_path) -> None:
+    session_state = SessionState(conversation_messages=[])
+    session_state.memory_provider = StubMemoryProvider("[user] Lives in Shenzhen.")
+    store = SessionStore(session_state)
+    gateway = RecordingModelGateway(
+        [
+            ModelResponse(
+                content="先查一下。",
+                tool_calls=[{"id": "toolu_1", "name": "read_file", "args": {"path": "README.md"}}],
+                finish_reason="tool_use",
+            ),
+            ModelResponse(content="final answer", finish_reason="end_turn"),
+        ]
+    )
+
+    result = QueryLoop().run(
+        session_state=session_state,
+        store=store,
+        view_builder=FakeViewBuilder(),
+        prompt_assembler=FakePromptAssembler(),
+        model_gateway=gateway,
+        tool_runtime=FakeToolRuntime(),
+        tool_context=object(),
+        policy_runner=FakePolicyRunner(),
+        recovery=FakeRecovery(),
+        governor=FakeGovernor(),
+        offloader=FakeOffloader(),
+        user_message_content="我住在哪个城市？",
+        tools=None,
+        renderer=None,
+    )
+
+    assert result.stop_reason == StopReason.COMPLETED
+    assert session_state.memory_provider.prefetch_calls == ["我住在哪个城市？"]
+    assert session_state.memory_provider.sync_calls == [("我住在哪个城市？", "final answer")]
+    assert session_state.memory_provider.queued_queries == ["我住在哪个城市？"]
+    assert len(gateway.calls) == 2
+    for sent_messages in gateway.calls:
+        last_user = next(msg for msg in reversed(sent_messages) if msg.get("role") == "user")
+        assert "<memory-context>" in last_user["content"]
+        assert "Lives in Shenzhen." in last_user["content"]
+    assert not any(
+        "<memory-context>" in str(message.get("content", ""))
+        for message in session_state.conversation_messages
+    )
 
 
 def test_query_loop_renders_reasoning_with_todo_planning_policy() -> None:
@@ -392,6 +496,7 @@ def test_query_loop_streams_main_agent_when_enabled(monkeypatch) -> None:
     assert result.stop_reason == StopReason.COMPLETED
     assert renderer.begin_calls and renderer.end_calls
     assert renderer.event_types == ["response_start", "thinking_delta", "content_delta", "response_completed"]
+    assert renderer.assistant_calls == []
     assert session_state.conversation_messages[-1]["role"] == "assistant"
     assert session_state.conversation_messages[-1]["content"] == "最终回答"
 

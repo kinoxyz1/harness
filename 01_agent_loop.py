@@ -30,6 +30,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from select import select
+from rich.text import Text
 
 from core.shared.config import MAX_TURNS
 from core.shared.env_loader import load_project_env
@@ -48,6 +49,7 @@ from core.policy.skill_relevance import SkillRelevancePolicy
 from core.policy.skill_usage_nudge import SkillUsageNudgePolicy
 from core.query.recovery import RecoveryManager
 from core.ui.renderer import RichRenderer, render_markdown
+from core.shared.stream_events import make_event
 from core.session.commands import is_resume_command, is_skills_command, execute_resume_command
 from core.session.engine import SessionEngine
 from core.session.view_builder import MessageViewBuilder
@@ -268,6 +270,95 @@ def read_user_input(prompt: str = ">> ") -> str | None:
     return TerminalLineEditor(sys.stdin, sys.stdout).readline(prompt)
 
 
+def _render_resumed_assistant_message(
+    content: str,
+    reasoning: str,
+    *,
+    renderer=None,
+    replay_index: int,
+) -> None:
+    reasoning = reasoning.strip()
+    has_stream_renderer = renderer is not None and all(
+        hasattr(renderer, attr) for attr in ("begin_stream", "consume_event", "end_stream")
+    )
+    if has_stream_renderer and (reasoning or content):
+        turn_id = f"resume-{replay_index}"
+        renderer.begin_stream(turn_id, {"source": "resume_replay"})
+        sequence = 0
+        if reasoning:
+            sequence += 1
+            renderer.consume_event(make_event(
+                "thinking_delta",
+                turn_id,
+                sequence,
+                "model",
+                "replayed",
+                {"text": reasoning},
+            ))
+        if content:
+            sequence += 1
+            renderer.consume_event(make_event(
+                "content_delta",
+                turn_id,
+                sequence,
+                "model",
+                "replayed",
+                {"text": content},
+            ))
+        renderer.end_stream(turn_id, {"source_mode": "replayed"})
+        return
+    if reasoning:
+        console.print(Text(reasoning, style="dim"))
+    if renderer is not None and hasattr(renderer, "show_assistant"):
+        renderer.show_assistant(content)
+    else:
+        render_markdown(console, content)
+
+
+def _render_resumed_transcript(messages: list[dict], *, renderer=None) -> None:
+    if not messages:
+        return
+    console.print("Full transcript:")
+    tool_names_by_id: dict[str, str] = {}
+    replay_index = 0
+    for msg in messages:
+        role = msg.get("role", "")
+        raw_content = msg.get("content", "")
+        if not isinstance(raw_content, str):
+            raw_content = str(raw_content)
+        content = raw_content.strip()
+        if role == "user" and content.startswith("<system-reminder"):
+            continue
+        if role == "assistant":
+            for tool_call in msg.get("tool_calls", []) or []:
+                if isinstance(tool_call, dict):
+                    call_id = str(tool_call.get("id", "")).strip()
+                    tool_name = str(tool_call.get("name", "")).strip()
+                    if call_id and tool_name:
+                        tool_names_by_id[call_id] = tool_name
+            reasoning = msg.get("reasoning", "")
+            if isinstance(reasoning, str) and reasoning.strip() or content:
+                replay_index += 1
+                _render_resumed_assistant_message(
+                    content,
+                    reasoning if isinstance(reasoning, str) else str(reasoning),
+                    renderer=renderer,
+                    replay_index=replay_index,
+                )
+        elif role == "tool":
+            if not content:
+                continue
+            tool_name = tool_names_by_id.get(str(msg.get("tool_call_id", "")).strip(), "")
+            if renderer is not None and hasattr(renderer, "show_tool_result"):
+                renderer.show_tool_result(tool_name, content)
+            else:
+                console.print(content)
+        else:
+            if not content:
+                continue
+            console.print(f">> {content}")
+
+
 def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
     """处理一行用户输入。返回 (continue, resume_session_id)。
 
@@ -291,6 +382,12 @@ def handle_input(raw: str, engine: SessionEngine) -> tuple[bool, str | None]:
         result = execute_resume_command(text, session_db=engine.state.session_db)
         if result.output:
             console.print(result.output)
+        if result.transcript_messages:
+            console.print("")
+            _render_resumed_transcript(
+                result.transcript_messages,
+                renderer=getattr(engine, "_renderer", None),
+            )
         return True, result.resume_session_id
     result = engine.submit_user_message(text)
     if result.final_output and not result.streaming_displayed:

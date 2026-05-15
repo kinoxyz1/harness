@@ -177,6 +177,43 @@ class TestClientCall:
 
     @patch("core.llm.anthropic_client.create_llm_client")
     @patch("core.llm.anthropic_client.normalize_messages")
+    @patch("core.llm.anthropic_client._parse_response")
+    def test_internal_memory_review_call_stays_silent(
+        self,
+        mock_parse_response,
+        mock_normalize_messages,
+        mock_create_client,
+    ):
+        mock_normalize_messages.return_value = ("", [{"role": "user", "content": "hi"}])
+        mock_response = MagicMock()
+        mock_response.content = []
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+        mock_create_client.return_value = mock_client
+        mock_parse_response.return_value = LLMResponse(
+            content=None,
+            tool_calls=[{"id": "toolu_1", "name": "memory", "args": {}}],
+            finish_reason="tool_use",
+            prompt_tokens=10,
+            completion_tokens=5,
+        )
+
+        client = AnthropicClient()
+        with (
+            patch("core.llm.anthropic_client.sys.stdout.write") as mock_write,
+            patch("core.llm.anthropic_client.sys.stdout.flush"),
+            patch("core.llm.anthropic_client._console.print") as mock_print,
+        ):
+            client.call(
+                [{"role": "user", "content": "hi"}],
+                request_options=ModelRequestOptions(query_source="memory_review"),
+            )
+
+        mock_write.assert_not_called()
+        mock_print.assert_not_called()
+
+    @patch("core.llm.anthropic_client.create_llm_client")
+    @patch("core.llm.anthropic_client.normalize_messages")
     def test_call_reclassifies_prompt_too_long_errors(
         self,
         mock_normalize_messages,

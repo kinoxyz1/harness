@@ -1,6 +1,7 @@
 """显示渲染实现。"""
 from __future__ import annotations
 
+import threading
 import time
 from itertools import islice
 from pathlib import Path
@@ -162,6 +163,11 @@ class RichRenderer:
         self._content_text: str = ""
         self._last_flush_at = time.monotonic()
         self._stream_live: Live | None = None
+        self._tool_input_progress: int = 0
+        self._stream_dirty: bool = False
+        self._stream_stop_event = threading.Event()
+        self._stream_flush_thread: threading.Thread | None = None
+        self._stream_lock = threading.Lock()
 
     def show_thinking(self, title: str, reasoning: str) -> None:
         """显示推理/思考过程。"""
@@ -248,13 +254,21 @@ class RichRenderer:
         self._thinking_text = ""
         self._content_text = ""
         self._tool_input_progress = 0
+        self._stream_dirty = False
         self._last_flush_at = time.monotonic()
+        self._stream_stop_event = threading.Event()
         self._stream_live = Live(
             console=self._console,
             transient=False,
             refresh_per_second=12,
         )
         self._stream_live.__enter__()
+        self._stream_flush_thread = threading.Thread(
+            target=self._stream_flush_loop,
+            name=f"stream-render-{turn_id}",
+            daemon=True,
+        )
+        self._stream_flush_thread.start()
 
     def _update_stream_display(self) -> None:
         if self._stream_live is None:
@@ -281,18 +295,28 @@ class RichRenderer:
     def _flush_stream_if_due(self, *, force: bool = False) -> None:
         elapsed_ms = (time.monotonic() - self._last_flush_at) * 1000
         if not force and elapsed_ms < STREAMING_RENDER_FLUSH_MS:
+            self._stream_dirty = True
             return
         self._update_stream_display()
+        self._stream_dirty = False
         self._last_flush_at = time.monotonic()
+
+    def _stream_flush_loop(self) -> None:
+        while not self._stream_stop_event.wait(0.05):
+            if not self._stream_dirty:
+                continue
+            self._flush_stream_if_due()
 
     def consume_event(self, event: StreamEvent) -> None:
         if event.type == "thinking_delta":
+            had_thinking = bool(self._thinking_text)
             self._thinking_text += str(event.payload.get("text", ""))
-            self._flush_stream_if_due()
+            self._flush_stream_if_due(force=not had_thinking)
             return
         if event.type == "content_delta":
+            had_content = bool(self._content_text)
             self._content_text += str(event.payload.get("text", ""))
-            self._flush_stream_if_due()
+            self._flush_stream_if_due(force=not had_content)
             return
         if event.type == "tool_input_delta":
             # Keep the Live widget alive during tool argument generation
@@ -308,7 +332,11 @@ class RichRenderer:
 
     def end_stream(self, turn_id: str, result_meta: dict[str, Any]) -> None:
         # Do one final flush to ensure the Live widget shows complete content
-        self._update_stream_display()
+        self._flush_stream_if_due(force=True)
+        self._stream_stop_event.set()
+        if self._stream_flush_thread is not None:
+            self._stream_flush_thread.join(timeout=0.2)
+            self._stream_flush_thread = None
 
         if self._stream_live is not None:
             self._stream_live.__exit__(None, None, None)
@@ -317,6 +345,7 @@ class RichRenderer:
         self._thinking_text = ""
         self._content_text = ""
         self._tool_input_progress = 0
+        self._stream_dirty = False
         self._stream_turn_id = None
 
 

@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from core.skills.registry import SkillRegistry
 
 
+_MAIN_CONVERSATION_HIDDEN_TOOLS = {"memory"}
+
+
 def _estimate_block_tokens(content: str) -> int:
     return max(1, len(content) // 4)
 
@@ -297,7 +300,11 @@ class PromptAssembler:
     ) -> list[dict[str, Any]] | None:
         if tools is None:
             return None
-        return [dict(t) for t in tools]
+        return [
+            dict(tool)
+            for tool in tools
+            if tool.get("name") not in _MAIN_CONVERSATION_HIDDEN_TOOLS
+        ]
 
     def build_runtime_blocks(
         self,
@@ -368,19 +375,4 @@ class PromptAssembler:
         state: SessionState,
         run_state: RunState,
     ) -> list[ContextBlock]:
-        provider = getattr(state, "memory_provider", None)
-        if provider is None:
-            return []
-        query = state.user_intents[-1] if state.user_intents else ""
-        recalled = provider.prefetch(query)
-        block = build_memory_context_block(recalled)
-        if not block:
-            return []
-        return [
-            ContextBlock(
-                kind="memory_context",
-                content=block,
-                required=False,
-                token_estimate=_estimate_block_tokens(block),
-            )
-        ]
+        return []

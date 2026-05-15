@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from dataclasses import dataclass
 
 from core.skills import SkillRegistry, compute_skills_revision
@@ -12,6 +13,7 @@ class CommandResult:
     handled: bool
     output: str = ""
     resume_session_id: str | None = None
+    transcript_messages: list[dict] | None = None
 
 
 def is_skills_command(raw: str) -> bool:
@@ -126,26 +128,41 @@ def is_resume_command(raw: str) -> bool:
 
 
 def execute_resume_command(raw: str, *, session_db) -> CommandResult:
+    def _format_timestamp(ts: float) -> str:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
     parts = raw.strip().split()
     if len(parts) == 1 or (len(parts) == 2 and parts[1] == "list"):
         if session_db is None:
             return CommandResult(True, "SessionDB not available.")
-        sessions = session_db.list_sessions(limit=20)
+        sessions = [item for item in session_db.list_sessions(limit=20) if item.get("message_count", 0) > 0]
         if not sessions:
             return CommandResult(True, "No previous sessions found.")
-        lines = ["Recent sessions:"]
+        lines = ["Recent sessions (most recently active first):"]
         for item in sessions:
             sid = item["id"]
-            lines.append(f"- {sid} ({item['message_count']} messages)")
+            stamp = _format_timestamp(float(item.get("updated_at", 0.0)))
+            preview = str(item.get("preview", "")).strip()
+            suffix = f" — {preview}" if preview else ""
+            lines.append(f"- {sid} ({item['message_count']} messages, last active {stamp}){suffix}")
         lines.append("")
         lines.append("Use /resume <session_id> to restore a session.")
         return CommandResult(True, "\n".join(lines))
 
     if len(parts) == 2:
+        transcript_messages: list[dict] = []
+        if session_db is not None:
+            messages = session_db.get_messages(parts[1])
+            if not messages:
+                snapshot = session_db.load_session_snapshot(parts[1])
+                if snapshot is not None:
+                    messages = list(snapshot.get("conversation_messages", []))
+            transcript_messages = list(messages)
         return CommandResult(
             handled=True,
             output=f"Resuming session {parts[1]}...",
             resume_session_id=parts[1],
+            transcript_messages=transcript_messages,
         )
 
     return CommandResult(True, "Usage: /resume | /resume list | /resume <session_id>")

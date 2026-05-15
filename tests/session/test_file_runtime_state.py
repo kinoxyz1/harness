@@ -223,3 +223,82 @@ def test_bash_blocked_command_returns_blocked_outcome(tmp_path) -> None:
     assert outcome.error == "blocked"
     assert outcome.session_updates == []
     assert outcome.run_updates == []
+
+
+def test_bash_reports_incremental_output_progress(tmp_path, monkeypatch) -> None:
+    from core.tools.builtin.bash import handle
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.status_calls: list[str] = []
+
+        def show_status(self, message: str) -> None:
+            self.status_calls.append(message)
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self._chunks = [
+                b"line one\n",
+                b"line two\n",
+            ]
+
+        def read1(self, size: int) -> bytes:
+            if self._chunks:
+                return self._chunks.pop(0)
+            return b""
+
+        def read(self) -> bytes:
+            return b""
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self._polls = 0
+
+        def poll(self):
+            self._polls += 1
+            return 0 if self._polls >= 3 else None
+
+        def kill(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    class FakeSelector:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def register(self, fileobj, events) -> None:
+            self._fileobj = fileobj
+
+        def select(self, timeout=None):
+            self._calls += 1
+            if self._calls <= 2:
+                return [(type("Key", (), {"fileobj": self._fileobj})(), None)]
+            return []
+
+        def close(self) -> None:
+            return None
+
+    time_values = iter([100.0, 100.0, 101.5, 103.0, 103.0, 103.1, 103.1])
+    monkeypatch.setattr("core.tools.builtin.bash.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr("core.tools.builtin.bash.selectors.DefaultSelector", FakeSelector)
+    monkeypatch.setattr("core.tools.builtin.bash.time.time", lambda: next(time_values))
+
+    ctx = _make_context(tmp_path)
+    ctx._renderer = Recorder()
+    ctx._set_call_identity(name="bash", call_id="toolu_bash", turn=1)
+
+    outcome = handle({"command": "python3 fake.py"}, ctx)
+
+    assert outcome.status == ToolOutcomeStatus.SUCCESS
+    assert "line one" in outcome.messages[0]["content"]
+    assert "line two" in outcome.messages[0]["content"]
+    assert ctx.renderer.status_calls == [
+        "bash 输出中... 1 行，最新: line one",
+        "bash 输出中... 2 行，最新: line two",
+    ]

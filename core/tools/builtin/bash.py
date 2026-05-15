@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import selectors
 import shlex
 import subprocess
 import time
@@ -121,34 +123,79 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
 
     # 执行
     try:
+        env = dict(os.environ)
+        env.setdefault("PYTHONUNBUFFERED", "1")
         proc = subprocess.Popen(
             command,
             shell=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=subprocess.STDOUT,
+            text=False,
+            bufsize=0,
+            env=env,
         )
         start = time.time()
-        while True:
-            if context.cancelled:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
+        output_parts: list[bytes] = []
+        last_output_status_at = start
+        total_nonempty_lines = 0
+        last_reported_line_count = 0
+        selector = selectors.DefaultSelector()
+        try:
+            if proc.stdout is not None:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                if context.cancelled:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return ToolInvocationOutcome(
+                        status=ToolOutcomeStatus.CANCELLED,
+                        error="cancelled",
+                        messages=[make_tool_message(context, "Command cancelled by user.")],
+                    )
+                if time.time() - start > BASH_TIMEOUT:
                     proc.kill()
-                return ToolInvocationOutcome(
-                    status=ToolOutcomeStatus.CANCELLED,
-                    error="cancelled",
-                    messages=[make_tool_message(context, "Command cancelled by user.")],
-                )
-            if proc.poll() is not None:
-                break
-            if time.time() - start > BASH_TIMEOUT:
-                proc.kill()
-                raise subprocess.TimeoutExpired(command, BASH_TIMEOUT)
-            time.sleep(0.2)
-        stdout, stderr = proc.communicate()
-        out = (stdout + stderr).strip()
+                    raise subprocess.TimeoutExpired(command, BASH_TIMEOUT)
+
+                for key, _ in selector.select(timeout=0.2):
+                    reader = key.fileobj
+                    chunk = reader.read1(4096) if hasattr(reader, "read1") else reader.read(4096)
+                    if not chunk:
+                        continue
+                    output_parts.append(chunk)
+                    decoded = chunk.decode("utf-8", errors="replace")
+                    lines = [line.strip() for line in decoded.replace("\r", "\n").splitlines() if line.strip()]
+                    if not lines:
+                        continue
+                    latest = lines[-1]
+                    total_nonempty_lines += len(lines)
+                    now = time.time()
+                    if (
+                        context.renderer is not None
+                        and (
+                            now - last_output_status_at >= 1.0
+                            or total_nonempty_lines - last_reported_line_count >= 10
+                        )
+                    ):
+                        preview = latest[:120] + ("..." if len(latest) > 120 else "")
+                        context.renderer.show_status(
+                            f"bash 输出中... {total_nonempty_lines} 行，最新: {preview}"
+                        )
+                        last_output_status_at = now
+                        last_reported_line_count = total_nonempty_lines
+
+                if proc.poll() is not None:
+                    break
+        finally:
+            selector.close()
+
+        if proc.stdout is not None:
+            tail = proc.stdout.read()
+            if tail:
+                output_parts.append(tail)
+        out = b"".join(output_parts).decode("utf-8", errors="replace").strip()
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.SUCCESS,
             messages=[make_tool_message(context, out if out else "(no output)")],

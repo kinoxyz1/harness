@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.memory.store import MemoryStore
 from core.prompt.assembler import PromptAssembler
 from core.query.reducers import TransitionReason
 from core.query.state import RunState
@@ -91,6 +92,24 @@ def test_build_stable_returns_cached_value_on_second_call(tmp_path: Path) -> Non
     assert first == second
     # Verify the cache key exists (only one entry since same revision)
     assert any("stable_system_prompt:rev-1:" in k for k in state.prompt_cache)
+
+
+def test_build_stable_keeps_memory_snapshot_frozen_until_reload(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+    store = MemoryStore(base_dir=tmp_path)
+    store.load_from_disk()
+    state.memory_store = store
+    assembler = PromptAssembler()
+
+    before = assembler.build_stable(state, project_root=str(tmp_path))
+    store.add("user", "Call the user kino.")
+    still_frozen = assembler.build_stable(state, project_root=str(tmp_path))
+    store.load_from_disk()
+    after_reload = assembler.build_stable(state, project_root=str(tmp_path))
+
+    assert "Call the user kino." not in before
+    assert "Call the user kino." not in still_frozen
+    assert "Call the user kino." in after_reload
 
 
 def test_stable_cache_key_includes_prompt_digest(tmp_path: Path) -> None:
@@ -431,6 +450,19 @@ def test_build_stable_tools_returns_none_when_none(tmp_path: Path) -> None:
     assert result is None
 
 
+def test_build_stable_tools_hides_memory_from_main_conversation(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+    assembler = PromptAssembler()
+    tools = [
+        {"name": "todo", "description": "todo", "input_schema": {"type": "object"}},
+        {"name": "memory", "description": "memory", "input_schema": {"type": "object"}},
+    ]
+
+    result = assembler.build_stable_tools(state, tools=tools)
+
+    assert [tool["name"] for tool in result] == ["todo"]
+
+
 # ── build_runtime_blocks ─────────────────────────────────────
 
 
@@ -483,6 +515,22 @@ def test_build_runtime_blocks_omits_file_runtime_when_empty(tmp_path: Path) -> N
 
 def test_build_query_overlay_blocks_returns_empty(tmp_path: Path) -> None:
     state = make_state(tmp_path)
+    assembler = PromptAssembler()
+
+    result = assembler.build_query_overlay_blocks(state, RunState())
+
+    assert result == []
+
+
+def test_build_query_overlay_blocks_ignores_memory_provider(tmp_path: Path) -> None:
+    state = make_state(tmp_path)
+
+    class StubProvider:
+        def prefetch(self, query: str) -> str:
+            return "recalled memory"
+
+    state.memory_provider = StubProvider()
+    state.user_intents.append("where do I live?")
     assembler = PromptAssembler()
 
     result = assembler.build_query_overlay_blocks(state, RunState())

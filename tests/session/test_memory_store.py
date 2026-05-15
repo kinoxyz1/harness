@@ -36,6 +36,12 @@ class TestMemoryStoreAdd:
         assert result["ok"] is False
         assert "duplicate" in result["error"]
 
+    def test_add_near_duplicate_user_entry_rejected(self, store):
+        store.add("user", 'User enjoys roleplay as "皇上" with assistant acting as "老奴".')
+        result = store.add("user", 'Enjoys playful "皇上/老奴" roleplay persona with the assistant.')
+        assert result["ok"] is False
+        assert "duplicate" in result["error"]
+
     def test_add_persists_to_disk(self, store, tmp_path):
         store.add("memory", "persistent fact")
         mem_path = tmp_path / ".harness" / "memories" / "MEMORY.md"
@@ -100,6 +106,7 @@ class TestMemoryStoreLimits:
 class TestMemoryStorePromptFormat:
     def test_format_memory(self, store):
         store.add("memory", "fact A")
+        store.load_from_disk()
         formatted = store.format_for_prompt("memory")
         assert "<agent-memory>" in formatted
         assert "<entry>fact A</entry>" in formatted
@@ -107,6 +114,7 @@ class TestMemoryStorePromptFormat:
 
     def test_format_user(self, store):
         store.add("user", "likes dark mode")
+        store.load_from_disk()
         formatted = store.format_for_prompt("user")
         assert "<user-profile>" in formatted
         assert "<entry>likes dark mode</entry>" in formatted
@@ -114,10 +122,16 @@ class TestMemoryStorePromptFormat:
     def test_format_empty(self, store):
         assert store.format_for_prompt("memory") == ""
 
-    def test_format_updates_after_add(self, store):
+    def test_format_stays_frozen_after_add_until_reload(self, store):
         store.add("memory", "first")
-        assert "first" in store.format_for_prompt("memory")
+        assert store.format_for_prompt("memory") == ""
         store.add("memory", "second")
+        assert store.format_for_prompt("memory") == ""
+
+    def test_format_refreshes_after_load_from_disk(self, store):
+        store.add("memory", "first")
+        store.add("memory", "second")
+        store.load_from_disk()
         formatted = store.format_for_prompt("memory")
         assert "first" in formatted
         assert "second" in formatted
@@ -127,14 +141,32 @@ class TestMemoryStoreLoadFromDisk:
     def test_load_existing(self, tmp_path):
         mem_dir = tmp_path / ".harness" / "memories"
         mem_dir.mkdir(parents=True)
-        (mem_dir / "MEMORY.md").write_text("saved entry")
-        (mem_dir / "USER.md").write_text("user entry")
+        (mem_dir / "MEMORY.md").write_text("saved entry\n§\nsecond entry", encoding="utf-8")
+        (mem_dir / "USER.md").write_text("user entry", encoding="utf-8")
 
         store = MemoryStore(base_dir=tmp_path)
         store.load_from_disk()
-        assert store.memory_entries == ["saved entry"]
+        assert store.memory_entries == ["saved entry", "second entry"]
         assert store.user_entries == ["user entry"]
         assert "saved entry" in store.format_for_prompt("memory")
+        assert "---" in (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+
+    def test_load_rewrites_user_file_without_section_marker(self, tmp_path):
+        mem_dir = tmp_path / ".harness" / "memories"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "USER.md").write_text(
+            'User enjoys roleplay as "皇上" with assistant acting as "老奴".\n§\n'
+            'Enjoys playful "皇上/老奴" roleplay persona with the assistant.',
+            encoding="utf-8",
+        )
+
+        store = MemoryStore(base_dir=tmp_path)
+        store.load_from_disk()
+
+        assert len(store.user_entries) == 1
+        rendered = (mem_dir / "USER.md").read_text(encoding="utf-8")
+        assert "§" not in rendered
+        assert "---" not in rendered
 
     def test_load_nonexistent(self, tmp_path):
         store = MemoryStore(base_dir=tmp_path)

@@ -45,6 +45,9 @@ class SessionSerializer:
         state.queries_since_skill_activation = int(data.get("queries_since_skill_activation", 0))
         state.last_known_skill_keys = set(data.get("last_known_skill_keys", []))
         state.skill_relevance_cooldown = dict(data.get("skill_relevance_cooldown", {}))
+        state.user_turn_count = int(data.get("user_turn_count", 0))
+        state.turns_since_memory_review = int(data.get("turns_since_memory_review", 0))
+        state.memory_review_interval = int(data.get("memory_review_interval", state.memory_review_interval))
         state._last_flushed_idx = int(data.get("_last_flushed_idx", 0))
 
         todo_raw = data.get("todo_state", {})

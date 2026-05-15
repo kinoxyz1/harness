@@ -134,6 +134,37 @@ class TestSessionDBListSessions:
     def test_list_sessions_empty(self, db):
         assert db.list_sessions() == []
 
+    def test_list_sessions_include_preview_and_order_by_recent_activity(self, db):
+        db.ensure_session_row("older")
+        db.append_messages("older", [
+            {"role": "user", "content": "Inspect the billing worker", "_meta": {"created_at": time.time()}},
+        ])
+        db.ensure_session_row("newer")
+        db.append_messages("newer", [
+            {"role": "user", "content": "Fix the resume transcript display", "_meta": {"created_at": time.time()}},
+        ])
+
+        sessions = db.list_sessions()
+
+        assert sessions[0]["id"] == "newer"
+        assert sessions[0]["preview"] == "Fix the resume transcript display"
+        assert sessions[1]["id"] == "older"
+
+    def test_list_sessions_recomputes_message_count_from_messages_table(self, db):
+        db.ensure_session_row("stale")
+        db.append_messages("stale", [
+            {"role": "user", "content": "hello", "_meta": {"created_at": time.time()}},
+            {"role": "assistant", "content": "world", "_meta": {"created_at": time.time()}},
+        ])
+
+        db._conn.execute("DELETE FROM messages WHERE session_id = ?", ("stale",))
+        db._conn.commit()
+
+        sessions = db.list_sessions()
+        stale = next(item for item in sessions if item["id"] == "stale")
+        assert stale["message_count"] == 0
+        assert stale["preview"] == ""
+
 
 class TestSessionDBSearch:
     def test_search_messages(self, db):

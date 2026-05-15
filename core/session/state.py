@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from core.skills import SkillEvent, SkillMeta
+from core.shared.config import MEMORY_REVIEW_INTERVAL
 from core.skills.models import InvokedSkillRecord
 from core.tasks.models import TaskState
 
@@ -117,4 +118,7 @@ class SessionState:
     memory_store: Any = None
     session_db: Any = None
     memory_provider: Any = None
+    user_turn_count: int = 0
+    turns_since_memory_review: int = 0
+    memory_review_interval: int = MEMORY_REVIEW_INTERVAL
     _last_flushed_idx: int = 0

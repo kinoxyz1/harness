@@ -421,7 +421,7 @@ class ToolExecutorRuntime:
         thread.start()
 
         shown_trace_progress = False
-        shown_compact_status = False
+        last_compact_status_elapsed: int | None = None
         while thread.is_alive():
             thread.join(timeout=0.2)
             if thread.is_alive():
@@ -434,10 +434,10 @@ class ToolExecutorRuntime:
                     elif (
                         self._renderer is not None
                         and not self._display.quiet
-                        and not shown_compact_status
+                        and (last_compact_status_elapsed is None or elapsed - last_compact_status_elapsed >= 2)
                     ):
                         self._renderer.show_status(f"{call.name} 执行中... {elapsed}s")
-                        shown_compact_status = True
+                        last_compact_status_elapsed = elapsed
 
         if shown_trace_progress and not self._display.quiet:
             sys.stdout.write("\r\033[K")

@@ -43,8 +43,12 @@ fresh_subagent 任务用 task_execute 执行。
 如果当前请求已进入 task planning 阶段，则先完成 task_plan，再在当前任务明确需要时调用 skill 工具加载对应 skill。
 """
 
-# 用户定制文件的加载顺序（后面的覆盖前面的）
-_CONTEXT_FILES = ["identity.md", "style.md", "rules.md"]
+# 用户定制文件的加载顺序。每组优先使用新命名，回退兼容旧命名。
+_CONTEXT_FILE_GROUPS = [
+    ("USER.md", "identity.md"),
+    ("SOUL.md", "style.md"),
+    ("RULES.md", "rules.md"),
+]
 
 
 def get_system_context(project_root: str | None = None) -> str:
@@ -59,15 +63,18 @@ def get_system_context(project_root: str | None = None) -> str:
     if project_root:
         context_dir = Path(project_root) / ".harness" / "context"
         if context_dir.is_dir():
-            for filename in _CONTEXT_FILES:
-                filepath = context_dir / filename
-                if filepath.is_file():
+            for group in _CONTEXT_FILE_GROUPS:
+                for filename in group:
+                    filepath = context_dir / filename
+                    if not filepath.is_file():
+                        continue
                     try:
                         content = filepath.read_text(encoding="utf-8").strip()
                     except (OSError, UnicodeDecodeError):
                         continue
                     if content:
                         parts.append(content)
+                    break
 
     return "\n\n".join(parts)
 

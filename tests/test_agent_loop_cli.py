@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from rich.text import Text
 
 
 agent_loop = import_module("01_agent_loop")
@@ -14,6 +15,7 @@ class FakeEngine:
     def __init__(self):
         self.commands = []
         self.messages = []
+        self._renderer = None
 
     def handle_command(self, raw: str) -> str:
         self.commands.append(raw)
@@ -46,6 +48,138 @@ def test_cli_routes_normal_input_to_submit():
     assert engine.commands == []
     assert engine.messages == ["hello world"]
     mock_render.assert_called_once()
+
+
+def test_cli_renders_resume_transcript_with_stream_renderer_when_available():
+    engine = FakeEngine()
+    engine.state = SimpleNamespace(session_db=object())
+    replay_renderer = SimpleNamespace(
+        begin_stream=MagicMock(),
+        consume_event=MagicMock(),
+        end_stream=MagicMock(),
+        show_thinking=MagicMock(),
+        show_assistant=MagicMock(),
+        show_tool_result=MagicMock(),
+    )
+    engine._renderer = replay_renderer
+    transcript = [
+        {"role": "user", "content": "帮我修一下 resume"},
+        {"role": "user", "content": "<system-reminder type=\"skill_nudge\">ignore me</system-reminder>"},
+        {
+            "role": "assistant",
+            "content": "我先检查 session db。",
+            "reasoning": "先确认 resume 回放链路是否绕过了 renderer。",
+            "tool_calls": [{"id": "toolu_1", "name": "memory", "args": {}}],
+        },
+        {"role": "tool", "tool_call_id": "toolu_1", "content": "Memory updated. Usage: 20/1375 chars (1 entries)"},
+    ]
+
+    with (
+        patch.object(agent_loop, "execute_resume_command", return_value=SimpleNamespace(
+            handled=True,
+            output="Resuming session abc123...",
+            resume_session_id="abc123",
+            transcript_messages=transcript,
+        )),
+        patch.object(agent_loop.console, "print") as mock_print,
+    ):
+        should_continue, resume_id = agent_loop.handle_input("/resume abc123", engine)
+
+    assert should_continue is True
+    assert resume_id == "abc123"
+    mock_print.assert_any_call("Resuming session abc123...")
+    mock_print.assert_any_call("Full transcript:")
+    mock_print.assert_any_call(">> 帮我修一下 resume")
+    replay_renderer.show_thinking.assert_not_called()
+    replay_renderer.show_assistant.assert_not_called()
+    replay_renderer.begin_stream.assert_called_once()
+    replay_renderer.end_stream.assert_called_once()
+    consume_calls = replay_renderer.consume_event.call_args_list
+    assert len(consume_calls) == 2
+    assert consume_calls[0].args[0].type == "thinking_delta"
+    assert consume_calls[0].args[0].source_mode == "replayed"
+    assert consume_calls[0].args[0].payload == {"text": "先确认 resume 回放链路是否绕过了 renderer。"}
+    assert consume_calls[1].args[0].type == "content_delta"
+    assert consume_calls[1].args[0].source_mode == "replayed"
+    assert consume_calls[1].args[0].payload == {"text": "我先检查 session db。"}
+    replay_renderer.show_tool_result.assert_called_once_with(
+        "memory",
+        "Memory updated. Usage: 20/1375 chars (1 entries)",
+    )
+
+
+def test_cli_renders_resume_transcript_with_markdown_for_legacy_renderer():
+    engine = FakeEngine()
+    engine.state = SimpleNamespace(session_db=object())
+    replay_renderer = SimpleNamespace(
+        show_thinking=MagicMock(),
+        show_assistant=MagicMock(),
+        show_tool_result=MagicMock(),
+    )
+    engine._renderer = replay_renderer
+    transcript = [
+        {"role": "user", "content": "帮我修一下 resume"},
+        {
+            "role": "assistant",
+            "content": "我先检查 session db。",
+            "reasoning": "先确认 resume 回放链路是否绕过了 renderer。",
+        },
+    ]
+
+    with (
+        patch.object(agent_loop, "execute_resume_command", return_value=SimpleNamespace(
+            handled=True,
+            output="Resuming session abc123...",
+            resume_session_id="abc123",
+            transcript_messages=transcript,
+        )),
+        patch.object(agent_loop.console, "print") as mock_print,
+    ):
+        should_continue, resume_id = agent_loop.handle_input("/resume abc123", engine)
+
+    assert should_continue is True
+    assert resume_id == "abc123"
+    replay_renderer.show_thinking.assert_not_called()
+    assert any(
+        call.args
+        and isinstance(call.args[0], Text)
+        and call.args[0].plain == "先确认 resume 回放链路是否绕过了 renderer。"
+        and call.args[0].style == "dim"
+        for call in mock_print.call_args_list
+    )
+    replay_renderer.show_assistant.assert_called_once_with("我先检查 session db。")
+
+
+def test_cli_resume_keeps_tool_name_mapping_when_assistant_content_is_empty():
+    engine = FakeEngine()
+    engine.state = SimpleNamespace(session_db=object())
+    replay_renderer = SimpleNamespace(
+        show_tool_result=MagicMock(),
+    )
+    engine._renderer = replay_renderer
+    transcript = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "toolu_1", "name": "memory", "args": {}}],
+        },
+        {"role": "tool", "tool_call_id": "toolu_1", "content": "Memory updated. Usage: 20/1375 chars (1 entries)"},
+    ]
+
+    with patch.object(agent_loop, "execute_resume_command", return_value=SimpleNamespace(
+        handled=True,
+        output="Resuming session abc123...",
+        resume_session_id="abc123",
+        transcript_messages=transcript,
+    )):
+        should_continue, resume_id = agent_loop.handle_input("/resume abc123", engine)
+
+    assert should_continue is True
+    assert resume_id == "abc123"
+    replay_renderer.show_tool_result.assert_called_once_with(
+        "memory",
+        "Memory updated. Usage: 20/1375 chars (1 entries)",
+    )
 
 
 def test_cli_returns_true_for_empty_input():

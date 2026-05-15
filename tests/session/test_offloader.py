@@ -6,7 +6,10 @@ from core.session.offloader import ToolResultOffloader
 
 def test_maybe_persist_writes_large_tool_results_and_freezes_replacement(tmp_path: Path) -> None:
     state = ContentReplacementState()
-    offloader = ToolResultOffloader(tool_result_dir=tmp_path, replacement_state=state)
+    output_dir = tmp_path / "tool-results"
+    offloader = ToolResultOffloader(tool_result_dir=output_dir, replacement_state=state)
+
+    assert not output_dir.exists()
 
     replacement = offloader.maybe_persist(
         "toolu_big",
@@ -14,7 +17,7 @@ def test_maybe_persist_writes_large_tool_results_and_freezes_replacement(tmp_pat
         tool_name="web_fetch",
     )
 
-    saved = tmp_path / "toolu_big.txt"
+    saved = output_dir / "toolu_big.txt"
     assert saved.exists()
     assert state.seen_ids == {"toolu_big"}
     assert state.replacements["toolu_big"] == replacement

@@ -1,6 +1,7 @@
 """第一层：文件后备的身份记忆。"""
 from __future__ import annotations
 
+import difflib
 import fcntl
 import os
 import re
@@ -25,7 +26,8 @@ _INVISIBLE_CHARS = re.compile(r"[​-‏⁠-⁯﻿]")
 class MemoryStore:
     MEMORY_LIMIT = 2200
     USER_LIMIT = 1375
-    ENTRY_SEPARATOR = "\n§\n"
+    ENTRY_SEPARATOR = "\n\n---\n\n"
+    _LEGACY_ENTRY_SEPARATORS = ("\n§\n", ENTRY_SEPARATOR)
 
     def __init__(self, base_dir: str | Path) -> None:
         self._base_dir = Path(base_dir)
@@ -40,25 +42,27 @@ class MemoryStore:
         self.user_entries = self._read_entries("USER.md")
         self._snapshot["memory"] = self._render("memory")
         self._snapshot["user"] = self._render("user")
+        self._rewrite_canonical_file("memory")
+        self._rewrite_canonical_file("user")
 
     def format_for_prompt(self, target: str) -> str:
         return self._snapshot.get(target, "")
 
     def add(self, target: str, content: str) -> dict[str, Any]:
-        normalized = content.strip()
+        normalized = self._normalize_entry(target, content)
         if not normalized:
             return {"ok": False, "error": "content is empty"}
         err = self._security_scan(normalized)
         if err:
             return {"ok": False, "error": err}
         entries = self._entries_for(target)
-        if normalized in entries:
+        if any(self._is_duplicate_entry(target, normalized, existing) for existing in entries):
             return {"ok": False, "error": "duplicate entry"}
         entries.append(normalized)
         return self._write_back(target, entries)
 
     def replace(self, target: str, old: str, new: str) -> dict[str, Any]:
-        normalized = new.strip()
+        normalized = self._normalize_entry(target, new)
         if not normalized:
             return {"ok": False, "error": "content is empty"}
         err = self._security_scan(normalized)
@@ -100,7 +104,8 @@ class MemoryStore:
         text = path.read_text(encoding="utf-8").strip()
         if not text:
             return []
-        return [chunk.strip() for chunk in text.split(self.ENTRY_SEPARATOR) if chunk.strip()]
+        target = "memory" if filename == "MEMORY.md" else "user"
+        return self._dedupe_entries(target, self._split_entries(text))
 
     def _render(self, target: str) -> str:
         entries = self._entries_for(target)
@@ -114,13 +119,17 @@ class MemoryStore:
         return "\n".join(lines)
 
     def _write_back(self, target: str, entries: list[str]) -> dict[str, Any]:
-        rendered = self.ENTRY_SEPARATOR.join(entries)
+        deduped_entries = self._dedupe_entries(target, entries)
+        rendered = self._render_file(deduped_entries)
         limit = self._limit_for(target)
         if len(rendered) > limit:
             return {"ok": False, "error": f"Over limit: {len(rendered)}/{limit} chars"}
         self._atomic_write(self._path_for(target), rendered)
-        self._snapshot[target] = self._render(target)
-        return {"ok": True, "usage": f"{len(rendered)}/{limit} chars ({len(entries)} entries)"}
+        if target == "memory":
+            self.memory_entries = deduped_entries
+        else:
+            self.user_entries = deduped_entries
+        return {"ok": True, "usage": f"{len(rendered)}/{limit} chars ({len(deduped_entries)} entries)"}
 
     def _atomic_write(self, path: Path, content: str) -> None:
         lock_path = path.with_suffix(path.suffix + ".lock")
@@ -150,3 +159,77 @@ class MemoryStore:
             if pat.search(text):
                 return "potential secret leak pattern"
         return None
+
+    def _render_file(self, entries: list[str]) -> str:
+        return self.ENTRY_SEPARATOR.join(entry.strip() for entry in entries if entry.strip())
+
+    def _rewrite_canonical_file(self, target: str) -> None:
+        path = self._path_for(target)
+        if not path.exists():
+            return
+        try:
+            current = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return
+        rendered = self._render_file(self._entries_for(target))
+        if current != rendered:
+            self._atomic_write(path, rendered)
+
+    def _split_entries(self, text: str) -> list[str]:
+        for separator in self._LEGACY_ENTRY_SEPARATORS:
+            if separator in text:
+                return [chunk.strip() for chunk in text.split(separator) if chunk.strip()]
+        return [text.strip()] if text.strip() else []
+
+    def _normalize_entry(self, target: str, content: str) -> str:
+        normalized = re.sub(r"\s+", " ", content or "").strip()
+        if target == "user":
+            stripped = re.sub(
+                r"^(?:the\s+user|user)\s+(?=(?:enjoys?|likes?|prefers?|uses?|works?|responds?|is|has|wants?)\b)",
+                "",
+                normalized,
+                flags=re.I,
+            )
+            if stripped != normalized and stripped:
+                normalized = stripped
+                normalized = normalized[0].upper() + normalized[1:]
+        return normalized
+
+    def _dedupe_entries(self, target: str, entries: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for entry in entries:
+            normalized = self._normalize_entry(target, entry)
+            if not normalized:
+                continue
+            if any(self._is_duplicate_entry(target, normalized, existing) for existing in deduped):
+                continue
+            deduped.append(normalized)
+        return deduped
+
+    def _is_duplicate_entry(self, target: str, candidate: str, existing: str) -> bool:
+        left = self._normalize_entry(target, candidate)
+        right = self._normalize_entry(target, existing)
+        if left == right:
+            return True
+        if target != "user":
+            return False
+        left_lower = left.casefold()
+        right_lower = right.casefold()
+        if left_lower in right_lower or right_lower in left_lower:
+            return True
+        return difflib.SequenceMatcher(a=self._fingerprint(left), b=self._fingerprint(right)).ratio() >= 0.62
+
+    def _fingerprint(self, text: str) -> str:
+        lowered = text.casefold()
+        lowered = lowered.replace("emperor", "皇上")
+        lowered = lowered.replace("loyal servant", "老奴")
+        lowered = lowered.replace("servant", "老奴")
+        lowered = lowered.replace("roleplay", "角色扮演")
+        lowered = lowered.replace("persona", "角色设定")
+        lowered = lowered.replace("imperial", "皇上")
+        lowered = lowered.replace("playful", "轻松")
+        lowered = lowered.replace("humorous", "幽默")
+        lowered = lowered.replace("deferential", "恭敬")
+        lowered = lowered.replace('"', "")
+        lowered = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", lowered)
+        return lowered

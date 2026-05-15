@@ -5,6 +5,7 @@ import json
 import random
 import sqlite3
 import time
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -174,18 +175,51 @@ class SessionDB:
             result.append(msg)
         return result
 
+    def load_session_snapshot(self, session_id: str) -> dict[str, Any] | None:
+        path = self._sessions_dir / session_id / "state.json"
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         cur = self._conn.execute(
             """
-            SELECT id, title, message_count, updated_at
-            FROM sessions
-            ORDER BY updated_at DESC
+            SELECT
+                s.id,
+                s.title,
+                (
+                    SELECT COUNT(*)
+                    FROM messages m_count
+                    WHERE m_count.session_id = s.id
+                ) AS message_count,
+                s.updated_at,
+                COALESCE(
+                    NULLIF(s.title, ''),
+                    (
+                        SELECT m.content
+                        FROM messages m
+                        WHERE m.session_id = s.id
+                          AND m.role = 'user'
+                          AND m.content <> ''
+                        ORDER BY m.id ASC
+                        LIMIT 1
+                    ),
+                    ''
+                ) AS preview
+            FROM sessions s
+            ORDER BY s.updated_at DESC
             LIMIT ?
             """,
             (limit,),
         )
         return [
-            {"id": row[0], "title": row[1], "message_count": row[2], "updated_at": row[3]}
+            {
+                "id": row[0],
+                "title": row[1],
+                "message_count": row[2],
+                "updated_at": row[3],
+                "preview": _normalize_preview_text(row[4]),
+            }
             for row in cur.fetchall()
         ]
 
@@ -202,3 +236,10 @@ class SessionDB:
             (query, limit),
         )
         return [{"role": row[0], "content": row[1]} for row in cur.fetchall()]
+
+
+def _normalize_preview_text(text: Any, *, limit: int = 80) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit].rstrip() + "..."

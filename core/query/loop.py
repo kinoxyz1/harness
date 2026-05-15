@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+from core.prompt.assembler import build_memory_context_block
 from core.query.reducers import (
     TransitionReason,
     apply_run_update,
@@ -19,6 +20,7 @@ from core.query.reducers import (
 )
 from core.query.result import QueryResult, StopReason
 from core.query.state import RunState
+from core.memory.review import spawn_background_memory_review
 from core.session.state import TodoItem
 from core.tools.context import SessionUpdateKind
 from core.tools.runtime import ToolBatchResult, ToolCall
@@ -111,6 +113,27 @@ def _build_tool_fallback_status(tool_calls: list[ToolCall]) -> str | None:
     parts = [f"先{fragments[0]}"]
     parts.extend(f"然后{fragment}" for fragment in fragments[1:])
     return "；".join(parts) + "。"
+
+
+def _inject_ephemeral_memory_context(messages: list[dict], recalled: str) -> list[dict]:
+    """将 memory-context 注入 API 消息副本，不回写 session transcript。"""
+    block = build_memory_context_block(recalled)
+    copied = [dict(message) for message in messages]
+    if not block:
+        return copied
+
+    for index in range(len(copied) - 1, -1, -1):
+        if copied[index].get("role") != "user":
+            continue
+        content = copied[index].get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        suffix = f"\n{block}" if content else block
+        copied[index]["content"] = content + suffix
+        return copied
+
+    copied.append({"role": "user", "content": block})
+    return copied
 
 
 # ─── Todo 展示辅助 ────────────────────────────────────────────────────────────
@@ -277,9 +300,33 @@ class QueryLoop:
         """
         state = RunState()
 
+        prior_user_turn_count = len(session_state.user_intents)
+        interval = int(getattr(session_state, "memory_review_interval", 0))
+        if prior_user_turn_count > 0 and int(getattr(session_state, "user_turn_count", 0)) == 0:
+            session_state.user_turn_count = prior_user_turn_count
+            if interval > 0 and int(getattr(session_state, "turns_since_memory_review", 0)) == 0:
+                session_state.turns_since_memory_review = prior_user_turn_count % interval
+
+        should_review_memory = False
+        if user_message_content:
+            session_state.user_turn_count += 1
+            if interval > 0 and getattr(session_state, "memory_store", None) is not None:
+                session_state.turns_since_memory_review += 1
+                if session_state.turns_since_memory_review >= interval:
+                    should_review_memory = True
+                    session_state.turns_since_memory_review = 0
+
         # Store user original intent before entering the loop
         if user_message_content:
             session_state.user_intents.append(user_message_content)
+
+        recalled_memory = ""
+        provider = getattr(session_state, "memory_provider", None)
+        if provider is not None and user_message_content:
+            try:
+                recalled_memory = provider.prefetch(user_message_content)
+            except Exception:
+                recalled_memory = ""
 
         while True:
             for update in collect_runtime_maintenance_updates(session_state):
@@ -345,6 +392,7 @@ class QueryLoop:
                 prepared,
                 run_state=state,
             )
+            api_messages = _inject_ephemeral_memory_context(view.messages, recalled_memory)
 
             # ── 步骤 3：调用模型 ─────────────────────────────────────
             active_tools = None if state.stop_reason == "max_turns" else view.tools
@@ -362,7 +410,7 @@ class QueryLoop:
                     renderer.begin_stream(turn_id, {"source": "main_loop"})
                 try:
                     for event in model_gateway.stream_once(
-                        view.messages,
+                        api_messages,
                         system=view.system,
                         tools=active_tools,
                         request_options=request_options,
@@ -433,7 +481,7 @@ class QueryLoop:
                 try:
                     try:
                         model_resp = model_gateway.call_once(
-                            view.messages,
+                            api_messages,
                             system=view.system,
                             tools=active_tools,
                             request_options=request_options,
@@ -442,7 +490,7 @@ class QueryLoop:
                         if "request_options" not in str(exc):
                             raise
                         model_resp = model_gateway.call_once(
-                            view.messages,
+                            api_messages,
                             system=view.system,
                             tools=active_tools,
                         )
@@ -487,6 +535,8 @@ class QueryLoop:
 
             state.last_model_response = model_resp
             store.append(model_resp.to_message())
+            if renderer and getattr(model_resp, "reasoning", "").strip() and not state.current_thinking_visible:
+                renderer.show_thinking("思考过程", model_resp.reasoning)
 
             # ── 分支 0：输出被截断（finish=max_tokens）→ 继续循环 ──
             # 模型的回复被 max_tokens 截断，说明还有内容要输出。
@@ -580,6 +630,18 @@ class QueryLoop:
                     try:
                         provider.sync_turn(user_message_content, model_resp.content)
                         provider.queue_prefetch(user_message_content)
+                    except Exception:
+                        pass
+
+                if should_review_memory:
+                    try:
+                        spawn_background_memory_review(
+                            session_state=session_state,
+                            transcript=store.snapshot(),
+                            model_gateway=model_gateway,
+                            tool_runtime=tool_runtime,
+                            tools=tools,
+                        )
                     except Exception:
                         pass
 

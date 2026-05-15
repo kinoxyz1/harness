@@ -197,6 +197,7 @@ class AnthropicClient:
 
         display = display or RunDisplayOptions()
         request_options = request_options or ModelRequestOptions()
+        visible_output = display.quiet is False and request_options.query_source == "main_loop"
 
         normalized_system, api_messages = normalize_messages(messages)
         full_system = "\n\n".join(part for part in [system, normalized_system] if part)
@@ -240,17 +241,17 @@ class AnthropicClient:
             while thread.is_alive():
                 elapsed = int(time.time() - start)
                 if request_options.cancel_check and request_options.cancel_check():
-                    if not display.quiet:
+                    if visible_output:
                         sys.stdout.write("\r\033[K")
                         sys.stdout.flush()
                     self._reset_client()
                     raise RequestCancelledError("request cancelled by user")
-                if not display.quiet:
+                if visible_output:
                     sys.stdout.write(f"\r\033[K\033[32m正在思考... {elapsed}s\033[0m")
                     sys.stdout.flush()
                 thread.join(timeout=1.0)
 
-            if not display.quiet:
+            if visible_output:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
 
@@ -289,7 +290,7 @@ class AnthropicClient:
         llm_resp = _parse_response(response)
         llm_resp._raw = response
 
-        if not display.quiet:
+        if visible_output:
             _console.print(
                 f"[dim]{elapsed:.1f}s │ token {llm_resp.prompt_tokens}↓ {llm_resp.completion_tokens}↑"
                 f" │ finish={llm_resp.finish_reason}[/dim]"

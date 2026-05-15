@@ -33,6 +33,7 @@ class ToolResultOffloader:
         if len(content) <= threshold:
             return content
         safe_id = tool_use_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+        self._tool_result_dir.mkdir(parents=True, exist_ok=True)
         filepath = self._tool_result_dir / f"{safe_id}.txt"
         filepath.write_text(content, encoding="utf-8")
         preview = self._truncate_preview(content)
