@@ -28,8 +28,14 @@ SCHEMA: dict[str, Any] = {
                     "type": "object",
                     "properties": {
                         "task_id": {"type": "string"},
-                        "subject": {"type": "string"},
-                        "goal": {"type": "string"},
+                        "subject": {
+                            "type": "string",
+                            "description": "Short unique label for this task (2-8 words). Must be distinct from all other tasks. Shown in progress UI. Example: 'Read auth module', 'Fix login bug'.",
+                        },
+                        "goal": {
+                            "type": "string",
+                            "description": "What this task should accomplish. Detailed enough to act on without re-reading the user request.",
+                        },
                         "status": {
                             "type": "string",
                             "enum": ["pending", "in_progress", "blocked", "completed", "failed", "cancelled"],

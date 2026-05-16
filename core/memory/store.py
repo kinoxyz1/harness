@@ -3,11 +3,21 @@ from __future__ import annotations
 
 import difflib
 import fcntl
+import json
 import os
 import re
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
+
+
+_FINGERPRINT_STOPWORDS = frozenset(
+    "the a an is are was were has have had with from that this "
+    "and or but not very also just quite rather really "
+    "le la les un une des der die das ein eine "
+    "的 了 在 是 有 和 与 也 都 就 而 ".split()
+)
 
 
 _INJECTION_PATTERNS = [
@@ -28,6 +38,8 @@ class MemoryStore:
     USER_LIMIT = 1375
     ENTRY_SEPARATOR = "\n\n---\n\n"
     _LEGACY_ENTRY_SEPARATORS = ("\n§\n", ENTRY_SEPARATOR)
+    _FINGERPRINT_MAP_PATH = "fingerprint_map.json"
+    _fingerprint_map: dict[str, str]
 
     def __init__(self, base_dir: str | Path) -> None:
         self._base_dir = Path(base_dir)
@@ -36,6 +48,7 @@ class MemoryStore:
         self.memory_entries: list[str] = []
         self.user_entries: list[str] = []
         self._snapshot: dict[str, str] = {"memory": "", "user": ""}
+        self._fingerprint_map = self._load_fingerprint_map()
 
     def load_from_disk(self) -> None:
         self.memory_entries = self._read_entries("MEMORY.md")
@@ -220,16 +233,21 @@ class MemoryStore:
         return difflib.SequenceMatcher(a=self._fingerprint(left), b=self._fingerprint(right)).ratio() >= 0.62
 
     def _fingerprint(self, text: str) -> str:
-        lowered = text.casefold()
-        lowered = lowered.replace("emperor", "皇上")
-        lowered = lowered.replace("loyal servant", "老奴")
-        lowered = lowered.replace("servant", "老奴")
-        lowered = lowered.replace("roleplay", "角色扮演")
-        lowered = lowered.replace("persona", "角色设定")
-        lowered = lowered.replace("imperial", "皇上")
-        lowered = lowered.replace("playful", "轻松")
-        lowered = lowered.replace("humorous", "幽默")
-        lowered = lowered.replace("deferential", "恭敬")
-        lowered = lowered.replace('"', "")
-        lowered = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", lowered)
-        return lowered
+        normalized = unicodedata.normalize("NFKC", text.casefold())
+        normalized = normalized.replace('"', "")
+        tokens = re.findall(r"[a-z]+|[\u4e00-\u9fff]", normalized)
+        tokens = [t for t in tokens if t not in _FINGERPRINT_STOPWORDS]
+        tokens = [self._fingerprint_map.get(t, t) for t in tokens]
+        return "".join(tokens)
+
+    def _load_fingerprint_map(self) -> dict[str, str]:
+        path = self._mem_dir / self._FINGERPRINT_MAP_PATH
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            pass
+        return {}

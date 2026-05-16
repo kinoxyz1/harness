@@ -29,6 +29,13 @@ def validate_tasks(raw_tasks: list[dict], *, previous: TaskState | None) -> None
     normalized_statuses = [task.get("status", "pending") for task in raw_tasks]
     if sum(1 for status in normalized_statuses if status == "in_progress") > 1:
         raise ValueError("at most one in_progress task is allowed")
+    subjects = [str(task.get("subject", "")).strip() for task in raw_tasks]
+    seen: set[str] = set()
+    for subject in subjects:
+        if subject in seen:
+            raise ValueError(f"duplicate subject not allowed: {subject!r}. Each task must have a unique subject.")
+        if subject:
+            seen.add(subject)
 
 
 def build_task_state(raw_tasks: list[dict], *, previous: TaskState | None, turn_count: int) -> TaskState:

@@ -37,8 +37,8 @@ class TestMemoryStoreAdd:
         assert "duplicate" in result["error"]
 
     def test_add_near_duplicate_user_entry_rejected(self, store):
-        store.add("user", 'User enjoys roleplay as "皇上" with assistant acting as "老奴".')
-        result = store.add("user", 'Enjoys playful "皇上/老奴" roleplay persona with the assistant.')
+        store.add("user", "Prefers dark mode in editor")
+        result = store.add("user", "Likes dark mode in code editor")
         assert result["ok"] is False
         assert "duplicate" in result["error"]
 
@@ -155,8 +155,8 @@ class TestMemoryStoreLoadFromDisk:
         mem_dir = tmp_path / ".harness" / "memories"
         mem_dir.mkdir(parents=True)
         (mem_dir / "USER.md").write_text(
-            'User enjoys roleplay as "皇上" with assistant acting as "老奴".\n§\n'
-            'Enjoys playful "皇上/老奴" roleplay persona with the assistant.',
+            "Works with Python and TypeScript\n§\n"
+            "Develops using Python and TypeScript",
             encoding="utf-8",
         )
 
@@ -179,3 +179,51 @@ class TestMemoryStoreInvalidTarget:
     def test_invalid_target(self, store):
         with pytest.raises(ValueError, match="Unknown memory target"):
             store.add("invalid", "data")
+
+class TestMemoryStoreFingerprintMap:
+    def test_external_fingerprint_map_loaded(self, tmp_path):
+        import json
+        mem_dir = tmp_path / ".harness" / "memories"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        mapping = {"emperor": "皇上", "servant": "老奴"}
+        (mem_dir / "fingerprint_map.json").write_text(
+            json.dumps(mapping, ensure_ascii=False), encoding="utf-8"
+        )
+        store = MemoryStore(base_dir=tmp_path)
+        store.load_from_disk()
+        assert store._fingerprint_map == mapping
+
+    def test_fingerprint_map_enables_cross_language_dedup(self, tmp_path):
+        import json
+        mem_dir = tmp_path / ".harness" / "memories"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        mapping = {"emperor": "皇上", "servant": "老奴"}
+        (mem_dir / "fingerprint_map.json").write_text(
+            json.dumps(mapping, ensure_ascii=False), encoding="utf-8"
+        )
+        store = MemoryStore(base_dir=tmp_path)
+        store.load_from_disk()
+        result1 = store.add("user", "Enjoys emperor servant roleplay")
+        assert result1["ok"] is True
+        result2 = store.add("user", "Enjoys 皇上 老奴 roleplay")
+        assert result2["ok"] is False
+        assert "duplicate" in result2["error"]
+
+    def test_fingerprint_map_missing_file_is_safe(self, tmp_path):
+        store = MemoryStore(base_dir=tmp_path)
+        store.load_from_disk()
+        assert store._fingerprint_map == {}
+
+    def test_fingerprint_map_invalid_json_is_safe(self, tmp_path):
+        mem_dir = tmp_path / ".harness" / "memories"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / "fingerprint_map.json").write_text("not json{{{", encoding="utf-8")
+        store = MemoryStore(base_dir=tmp_path)
+        store.load_from_disk()
+        assert store._fingerprint_map == {}
+
+    def test_generic_near_duplicate_detection(self, store):
+        store.add("user", "Prefers dark mode in editor")
+        result = store.add("user", "Likes dark mode in code editor")
+        assert result["ok"] is False
+        assert "duplicate" in result["error"]
