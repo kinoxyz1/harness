@@ -19,6 +19,7 @@ class SessionSerializer:
         "skill_catalog",
         "skills_revision",
         "discovered_tools",
+        "background_manager",
     }
 
     @classmethod

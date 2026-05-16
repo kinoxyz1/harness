@@ -116,3 +116,17 @@ SUBAGENT_STREAMING_MODE: str = os.environ.get("SUBAGENT_STREAMING_MODE", "replay
 
 # 是否持久化未完成的流式输出
 PERSIST_PARTIAL_STREAM_OUTPUT: bool = os.environ.get("PERSIST_PARTIAL_STREAM_OUTPUT", "false").lower() in ("true", "1", "yes")
+
+# ─── 后台任务配置 ─────────────────────────────────────────────────────────────
+
+# 后台任务默认超时（秒）
+BG_TASK_DEFAULT_TIMEOUT: int = int(os.environ.get("BG_TASK_DEFAULT_TIMEOUT", "300"))
+
+# 后台任务通知预览最大字符数
+BG_TASK_PREVIEW_CHARS: int = int(os.environ.get("BG_TASK_PREVIEW_CHARS", "500"))
+
+# 同时运行的后台任务上限
+BG_MAX_CONCURRENT: int = int(os.environ.get("BG_MAX_CONCURRENT", "4"))
+
+# 后台任务元数据落盘目录
+BG_TASKS_DIR: str = os.environ.get("BG_TASKS_DIR", ".harness/bg-tasks")

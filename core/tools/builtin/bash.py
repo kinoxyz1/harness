@@ -100,6 +100,7 @@ def _extract_command_name(command: str) -> str:
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     """执行 bash 命令，返回结构化 outcome。"""
     command = args["command"]
+    effective_timeout = args.get("timeout", BASH_TIMEOUT)
 
     cmd_name = _extract_command_name(command)
 
@@ -155,9 +156,9 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
                         error="cancelled",
                         messages=[make_tool_message(context, "Command cancelled by user.")],
                     )
-                if time.time() - start > BASH_TIMEOUT:
+                if time.time() - start > effective_timeout:
                     proc.kill()
-                    raise subprocess.TimeoutExpired(command, BASH_TIMEOUT)
+                    raise subprocess.TimeoutExpired(command, effective_timeout)
 
                 for key, _ in selector.select(timeout=0.2):
                     reader = key.fileobj
@@ -204,7 +205,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
         return ToolInvocationOutcome(
             status=ToolOutcomeStatus.FAILURE,
             error="timeout",
-            messages=[make_tool_message(context, f"Timeout ({BASH_TIMEOUT}s)")],
+            messages=[make_tool_message(context, f"Timeout ({effective_timeout}s)")],
         )
     except (FileNotFoundError, OSError) as e:
         return ToolInvocationOutcome(

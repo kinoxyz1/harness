@@ -19,8 +19,10 @@ from typing import Any
 from core.memory.local_provider import LocalMemoryProvider
 from core.memory.store import MemoryStore
 from core.prompt.assembler import PromptAssembler
+from core.background.manager import BackgroundManager
 from core.shared.config import (
     BASH_RESULT_PERSIST_THRESHOLD,
+    BG_MAX_CONCURRENT,
     CONTEXT_WINDOW_TOKENS,
     TOOL_RESULT_PERSIST_THRESHOLD,
     TOOL_RESULT_PREVIEW_BYTES,
@@ -128,6 +130,16 @@ class SessionEngine:
         self._recovery = recovery
         self._renderer = renderer
         self._tools = tools
+
+        # BackgroundManager
+        self._background_manager = BackgroundManager(
+            tool_registry=tool_runtime.registry,
+            create_context=tool_runtime.create_background_context,
+            offloader=self._offloader,
+        )
+        self._background_manager.cleanup_stale_tasks()
+        self._state.background_manager = self._background_manager
+
         self._bootstrapped = False
 
         # Give tool context access to session state and skill registry

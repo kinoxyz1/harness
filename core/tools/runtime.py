@@ -403,6 +403,29 @@ class ToolExecutorRuntime:
         )
         return call_context
 
+    # ── 公共接口（供 BackgroundManager 使用）────────────────────
+
+    @property
+    def registry(self):
+        """工具注册表。"""
+        return self._registry
+
+    def create_background_context(self) -> ToolUseContext:
+        """创建一个共享关键状态的子 context。
+
+        与 _build_call_context（行 390-404）同源：共享 cancel_event、session_state、
+        file_state、skill_registry，确保后台任务享有完整的运行时能力。
+        """
+        ctx = ToolUseContext(
+            working_dir=self._context.working_dir,
+            max_turns=self._context.max_turns,
+        )
+        ctx._cancel_event = self._context._cancel_event
+        ctx._session_state = self._context._session_state
+        ctx._file_state = self._context._file_state
+        ctx._skill_registry = self._context._skill_registry
+        return ctx
+
     def _run_single(self, call: ToolCall, *, turn: int) -> ToolInvocationOutcome:
         call_context = self._build_call_context(call, turn=turn)
         start = time.time()

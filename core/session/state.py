@@ -121,4 +121,7 @@ class SessionState:
     user_turn_count: int = 0
     turns_since_memory_review: int = 0
     memory_review_interval: int = MEMORY_REVIEW_INTERVAL
+
+    # ── background tasks ──────────────────────────────────
+    background_manager: Any = None
     _last_flushed_idx: int = 0

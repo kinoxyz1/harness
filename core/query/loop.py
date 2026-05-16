@@ -136,6 +136,32 @@ def _inject_ephemeral_memory_context(messages: list[dict], recalled: str) -> lis
     return copied
 
 
+# ─── 后台任务通知辅助 ────────────────────────────────────────────────────────
+
+
+def _drain_bg_notifications(session_state, store, renderer=None) -> None:
+    """排空后台任务通知，格式化并追加到 store。"""
+    try:
+        _bg_mgr = getattr(session_state, "background_manager", None)
+        if _bg_mgr is None:
+            return
+        notifs = _bg_mgr.drain_notifications()
+        if not notifs:
+            return
+        parts = []
+        for n in notifs:
+            icon = {"completed": "✓", "failed": "✗", "timeout": "⏱"}.get(
+                n.type.replace("background_", ""), "•"
+            )
+            line = f"[bg {icon} {n.task_id}] {n.preview}"
+            parts.append(line)
+            if renderer:
+                renderer.show_status(line)
+        store.append({"role": "user", "content": "后台任务更新:\n" + "\n".join(parts)})
+    except Exception:
+        pass
+
+
 # ─── Todo 展示辅助 ────────────────────────────────────────────────────────────
 
 
@@ -331,6 +357,9 @@ class QueryLoop:
         while True:
             for update in collect_runtime_maintenance_updates(session_state):
                 apply_session_update(session_state, update)
+
+            # ── 步骤 0：排空后台任务通知 ──────────────────────────────
+            _drain_bg_notifications(session_state, store)
 
             # ── 步骤 1：策略注入 ──────────────────────────────────────
             before_messages = policy_runner.before_model_call(session_state, state)
@@ -644,6 +673,9 @@ class QueryLoop:
                         )
                     except Exception:
                         pass
+
+                # 退出前最后一次排空后台通知
+                _drain_bg_notifications(session_state, store, renderer)
 
                 self._persist_state(
                     session_state,
