@@ -83,6 +83,33 @@ def should_require_task_planning(user_intent: str) -> bool:
     return score >= 2
 
 
+
+
+COMPLEX_KEYWORDS = (
+    "系统地", "系统性", "评审", "设计文档", "实现计划", "架构", "探索", "调研", "跨模块",
+    "systematic", "review", "design", "implementation plan", "architecture", "explore", "investigate",
+)
+
+
+def _looks_complex(text: str) -> bool:
+    normalized = text.lower()
+    if any(keyword.lower() in normalized for keyword in COMPLEX_KEYWORDS):
+        return True
+    path_hits = sum(token in text for token in ("core/", "docs/", ".py", ".md", "/Users/"))
+    if len(text) >= 220 and path_hits >= 2:
+        return True
+    action_hits = sum(token in text for token in ("检查", "评估", "实现", "探索", "比较", "判断"))
+    conj_hits = sum(token in text for token in ("并且", "同时", "and"))
+    if conj_hits >= 2 and action_hits >= 2:
+        return True
+    return False
+
+
+def _latest_user_text(messages: list[dict]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content", ""))
+    return ""
 class TaskPlanningPolicy:
     def before_model_call(self, session_state, run_state) -> list[dict[str, str]]:
         if session_state.task_state.tasks_by_id:
@@ -95,18 +122,22 @@ class TaskPlanningPolicy:
         ):
             run_state.task_planning_required = True
             run_state.task_planning_reason = "complex_user_request"
+        # NEW: also check conversation messages for complexity signals
+        if not run_state.task_planning_required:
+            latest = _latest_user_text(session_state.conversation_messages)
+            if latest and _looks_complex(latest):
+                run_state.task_planning_required = True
+                run_state.task_planning_reason = "complex_user_request"
         if not run_state.task_planning_required:
             return []
 
-        run_state.allowed_tools_override = set(PREPLAN_ALLOWED_TOOLS)
+        run_state.allowed_tools_override = {"task_plan", "skill"}
         return [{
             "role": "user",
             "content": (
                 "<system-reminder type=\"task_planning\">\n"
-                "Current request requires task planning before execution.\n"
-                "Call `task_plan` with the full task list first.\n"
-                "You may still use lightweight read-only discovery tools if needed, "
-                "but do not edit files, dispatch subagents, or start execution until TaskState exists.\n"
+                "当前请求命中复杂任务启发式规则。先调用 task_plan 建立 TaskState，再继续执行。\n"
+                "如任务匹配某个 skill，可先加载 skill，再调用 task_plan。\n"
                 "</system-reminder>"
             ),
         }]
