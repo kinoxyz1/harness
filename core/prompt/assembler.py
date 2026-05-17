@@ -102,6 +102,35 @@ def _render_task_state(task_state: TaskState) -> str:
     return "\n".join(lines)
 
 
+
+
+def _render_dispatch_state(dispatch_state, *, char_budget: int) -> str:
+    if not dispatch_state.runs_by_id:
+        return ""
+    lines = ["<dispatch-state>"]
+    used = len("<dispatch-state>\n</dispatch-state>")
+    for run_id in reversed(dispatch_state.ordered_run_ids[-8:]):
+        record = dispatch_state.runs_by_id.get(run_id)
+        if record is None:
+            continue
+        block = [
+            (
+                f'  <dispatch-run run_id="{record.run_id}" source="{record.source_tool}" '
+                f'agent_type="{record.agent_type}" status="{record.status}" '
+                f'stop_reason="{record.stop_reason or ""}" turns="{record.turns_used}">'
+            ),
+            f"    prompt: {record.prompt_preview}",
+            f"    summary: {(record.result_summary or record.error_detail or '')[:120]}",
+            "  </dispatch-run>",
+        ]
+        rendered = "\n".join(block)
+        if used + len(rendered) > char_budget:
+            break
+        lines.extend(block)
+        used += len(rendered)
+    lines.append("</dispatch-state>")
+    return "\n".join(lines) if len(lines) > 2 else ""
+
 def build_memory_context_block(raw_context: str) -> str:
     if not raw_context or not raw_context.strip():
         return ""
@@ -256,6 +285,9 @@ class PromptAssembler:
             todo_xml = _render_todo_state(state.todo_state.items)
             if todo_xml:
                 parts.append(todo_xml)
+        dispatch_block = _render_dispatch_state(state.dispatch_state, char_budget=2_000)
+        if dispatch_block:
+            parts.append(dispatch_block)
         file_block = _render_file_runtime(state.read_file_state, char_budget=12_000)
         if file_block:
             parts.append(file_block)
@@ -354,6 +386,17 @@ class PromptAssembler:
                     content=todo_content,
                     required=True,
                     token_estimate=_estimate_block_tokens(todo_content),
+                )
+            )
+
+        dispatch_content = _render_dispatch_state(state.dispatch_state, char_budget=2_000)
+        if dispatch_content:
+            blocks.append(
+                ContextBlock(
+                    kind="dispatch_state",
+                    content=dispatch_content,
+                    required=False,
+                    token_estimate=_estimate_block_tokens(dispatch_content),
                 )
             )
 

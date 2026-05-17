@@ -972,3 +972,68 @@ def test_build_runtime_context_prefers_task_state_over_todo_state(tmp_path: Path
     assert "<task-state" in result
     assert "Inspect runtime" in result
     assert "<todo-state>" not in result
+
+
+# ── dispatch-state rendering ────────────────────────────────
+
+
+def test_build_runtime_context_includes_dispatch_state(tmp_path: Path) -> None:
+    from core.session.state import DispatchRunRecord, DispatchState
+
+    state = make_state(tmp_path)
+    state.dispatch_state = DispatchState(
+        runs_by_id={
+            "run-1": DispatchRunRecord(
+                run_id="run-1",
+                source_tool="task_execute",
+                task_id="task-1",
+                task_subject="Inspect runtime",
+                agent_type="plan",
+                status="completed",
+                prompt_preview="Task: Inspect runtime",
+                result_summary="Listed runtime breakpoints.",
+                stop_reason="completed",
+                turns_used=3,
+                started_at_turn=5,
+                completed_at_turn=5,
+            )
+        },
+        ordered_run_ids=["run-1"],
+    )
+    assembler = PromptAssembler()
+
+    result = assembler.build_runtime_context(state, working_dir=str(tmp_path))
+
+    assert "<dispatch-state>" in result
+    assert 'run_id="run-1"' in result
+    assert "Listed runtime breakpoints." in result
+
+
+def test_dispatch_state_respects_small_char_budget(tmp_path: Path) -> None:
+    from core.session.state import DispatchRunRecord, DispatchState
+
+    state = make_state(tmp_path)
+    state.dispatch_state = DispatchState(
+        runs_by_id={
+            f"run-{i}": DispatchRunRecord(
+                run_id=f"run-{i}",
+                source_tool="agent",
+                agent_type="general",
+                status="completed",
+                prompt_preview=f"Prompt {i}",
+                result_summary="X" * 200,
+                stop_reason="completed",
+                turns_used=1,
+                started_at_turn=i,
+                completed_at_turn=i,
+            )
+            for i in range(10)
+        },
+        ordered_run_ids=[f"run-{i}" for i in range(10)],
+    )
+    assembler = PromptAssembler()
+
+    result = assembler.build_runtime_context(state, working_dir=str(tmp_path), char_budget=1500)
+
+    assert "<dispatch-state>" in result
+    assert result.count("<dispatch-run ") < 10
