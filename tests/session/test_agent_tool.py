@@ -44,3 +44,67 @@ def test_agent_uses_dispatch_helper_for_prompt_visibility(tmp_path) -> None:
     assert kwargs["source_tool"] == "agent"
     assert kwargs["task_id"] is None
     assert kwargs["prompt_text"] == "Read the runtime stack and report in under 100 words."
+
+
+def test_agent_rejects_when_fresh_subagent_task_is_active(tmp_path) -> None:
+    from core.tools.builtin.agent import handle
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+
+    state = SessionState(conversation_messages=[])
+    state.task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Inspect runtime",
+                goal="Inspect runtime deeply",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.FRESH_SUBAGENT,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+    )
+
+    result = handle(
+        {
+            "description": "Inspect runtime",
+            "prompt": "Do the planned task for me.",
+            "subagent_type": "plan",
+        },
+        _context(state, tmp_path),
+    )
+
+    assert result.status.value == "failure"
+    assert result.error == "task_state_active_use_task_execute"
+
+
+def test_agent_rejects_when_local_task_is_active(tmp_path) -> None:
+    from core.tools.builtin.agent import handle
+    from core.tasks.models import TaskExecutionMode, TaskRecord, TaskState, TaskStatus
+
+    state = SessionState(conversation_messages=[])
+    state.task_state = TaskState(
+        tasks_by_id={
+            "task-1": TaskRecord(
+                task_id="task-1",
+                subject="Edit runtime",
+                goal="Edit runtime locally",
+                status=TaskStatus.IN_PROGRESS,
+                execution_mode=TaskExecutionMode.LOCAL,
+            )
+        },
+        ordered_task_ids=["task-1"],
+        current_task_id="task-1",
+    )
+
+    result = handle(
+        {
+            "description": "Edit runtime",
+            "prompt": "Implement the current task.",
+            "subagent_type": "general",
+        },
+        _context(state, tmp_path),
+    )
+
+    assert result.status.value == "failure"
+    assert result.error == "task_state_active_use_local_tools"
