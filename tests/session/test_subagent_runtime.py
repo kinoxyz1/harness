@@ -214,3 +214,56 @@ def test_existing_subagent_runtime_tool_event_name_uses_start_suffix(tmp_path) -
         runtime.run(request, emit=events.append)
 
     assert events[1]["event"] == "subagent_tool_call_start"
+
+
+def test_dispatch_subagent_emits_prompt_event_and_records_run(tmp_path) -> None:
+    from core.session.state import DispatchRunRecord, DispatchState, SessionState
+    from core.session.subagent import (
+        SubagentRequest,
+        SubagentType,
+        dispatch_subagent,
+    )
+
+    state = SessionState(conversation_messages=[])
+    parent = ToolUseContext(working_dir=str(tmp_path), max_turns=10)
+    parent.bind_runtime(session_state=state, skill_registry=None)
+    parent._set_call_identity(name="task_execute", call_id="toolu_task_execute", turn=5)
+    seen_events = []
+
+    class FakeRuntime:
+        def __init__(self, parent_context):
+            self.parent_context = parent_context
+
+        def run(self, request, emit=None):
+            if emit is not None:
+                emit({"event": "subagent_content_delta", "content": "done", "task_id": "task-1", "agent_type": "plan"})
+                emit({"event": "subagent_done", "task_id": "task-1", "agent_type": "plan", "stop_reason": "completed", "turns_used": 2})
+            return SimpleNamespace(
+                request=request,
+                output="done",
+                success=True,
+                stop_reason=SubagentStopReason.COMPLETED,
+                turns_used=2,
+                files_modified=[],
+            )
+
+    with patch("core.session.subagent.SubagentRuntime", FakeRuntime):
+        result = dispatch_subagent(
+            parent_context=parent,
+            source_tool="task_execute",
+            task_id="task-1",
+            task_subject="Inspect runtime",
+            prompt_text="Task: Inspect runtime\n\nDirective:\nInspect deeply",
+            request=SubagentRequest(
+                task_packet=TaskPacket(task_id="task-1", title="Inspect runtime", directive="Inspect deeply"),
+                agent_type=SubagentType.PLAN,
+            ),
+            emit=seen_events.append,
+        )
+
+    assert seen_events[0]["event"] == "subagent_prompt"
+    assert seen_events[-1]["event"] == "subagent_done"
+    record = state.dispatch_state.runs_by_id[result.run_id]
+    assert record.source_tool == "task_execute"
+    assert record.status == "completed"
+    assert record.result_summary == "done"

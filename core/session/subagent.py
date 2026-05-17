@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from uuid import uuid4
 import os
 from typing import Any, Callable
 
@@ -13,6 +14,7 @@ from ..policy.max_turns import MaxTurnsPolicy
 from ..query.recovery import RecoveryManager
 from ..shared.run_options import RunDisplayOptions
 from .engine import SessionEngine
+from .state import DispatchRunRecord, DispatchState, SessionState
 from .view_builder import MessageViewBuilder
 from ..tools import ToolUseContext, registry
 from ..tools.runtime import ToolExecutorRuntime
@@ -381,3 +383,111 @@ class SubagentRuntime:
             turns_used=result.turns_used,
             files_modified=list(result.files_modified),
         )
+
+
+@dataclass(slots=True)
+class DispatchExecution:
+    run_id: str
+    record: DispatchRunRecord
+    result: SubagentRunResult
+
+
+def _truncate_preview(text: str, limit: int = 160) -> str:
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def _truncate_prompt(text: str, limit: int = 1200) -> str:
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def _emit_dispatch_event(emit, event: dict) -> None:
+    if emit is not None:
+        emit(event)
+
+
+def _append_dispatch_record(state: SessionState | None, record: DispatchRunRecord) -> None:
+    if state is None:
+        return
+    state.dispatch_state.runs_by_id[record.run_id] = record
+    state.dispatch_state.ordered_run_ids.append(record.run_id)
+    state.dispatch_state.active_run_id = record.run_id
+    if len(state.dispatch_state.ordered_run_ids) > 20:
+        oldest_id = state.dispatch_state.ordered_run_ids.pop(0)
+        state.dispatch_state.runs_by_id.pop(oldest_id, None)
+
+
+def _finalize_dispatch_record(
+    state: SessionState | None,
+    *,
+    run_id: str,
+    result: SubagentRunResult,
+    turn_count: int,
+) -> None:
+    if state is None:
+        return
+    record = state.dispatch_state.runs_by_id.get(run_id)
+    if record is None:
+        return
+    record.status = "completed" if result.success else "failed"
+    record.result_summary = _truncate_preview(result.output, 200)
+    record.stop_reason = result.stop_reason.value
+    record.turns_used = result.turns_used
+    record.completed_at_turn = turn_count
+    if not result.success:
+        record.error_detail = result.output[:200]
+    if state.dispatch_state.active_run_id == run_id:
+        state.dispatch_state.active_run_id = None
+
+
+def dispatch_subagent(
+    *,
+    parent_context: ToolUseContext,
+    source_tool: str,
+    task_id: str | None,
+    task_subject: str | None,
+    prompt_text: str,
+    request: SubagentRequest,
+    emit=None,
+) -> DispatchExecution:
+    run_id = uuid4().hex[:12]
+    turn_count = parent_context.turn_count
+
+    record = DispatchRunRecord(
+        run_id=run_id,
+        source_tool=source_tool,
+        agent_type=request.agent_type.value,
+        status="running",
+        task_id=task_id,
+        task_subject=task_subject,
+        prompt_preview=_truncate_preview(prompt_text),
+        prompt_text=_truncate_prompt(prompt_text),
+        started_at_turn=turn_count,
+    )
+
+    _append_dispatch_record(parent_context.session_state, record)
+
+    _emit_dispatch_event(emit, {
+        "event": "subagent_prompt",
+        "run_id": run_id,
+        "task_id": task_id,
+        "agent_type": request.agent_type.value,
+        "source_tool": source_tool,
+        "task_subject": task_subject,
+        "content": record.prompt_text or prompt_text,
+    })
+
+    runtime = SubagentRuntime(parent_context=parent_context)
+    result = runtime.run(request, emit=emit)
+
+    _finalize_dispatch_record(
+        parent_context.session_state,
+        run_id=run_id,
+        result=result,
+        turn_count=turn_count,
+    )
+
+    return DispatchExecution(run_id=run_id, record=record, result=result)
