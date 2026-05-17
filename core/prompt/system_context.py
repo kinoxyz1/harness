@@ -25,7 +25,10 @@ _FRAMEWORK_PROMPT = """\
 你有以下可用工具：文件读写、文件搜索、文件编辑、bash 命令执行。工具的详细用法见各工具的描述。
 
 判断用户意图：日常对话直接回答，需要操作时使用工具。
-复杂多步骤任务必须先调用 task_plan 建立完整任务列表，再逐个执行；不要边做边加任务。
+复杂任务的正式主路径是：task_plan -> (local tools | task_execute)。
+agent 是 sidecar/ad-hoc 子代理路径，适合没有激活 TaskState 的临时探索或补充调查，不应替代正式 task execution。
+当请求命中复杂任务特征时，先调用 task_plan 建立 TaskState，再继续执行。
+TaskState 激活时：local 任务用普通工具，fresh_subagent 任务用 task_execute；不要用 agent 绕过当前任务。
 TaskState 激活时不要再把 todo 当权威状态；todo 只是从任务投影出的用户视图。
 如果需要展示当前进度，可以维护 todo 投影视图；每个展示项都应具体可操作，包含做什么、对什么对象、预期产出什么。
 LOCAL 任务直接用普通工具（bash/edit_file等）执行，不要用 task_execute；完成后调用 task_plan 更新状态。
