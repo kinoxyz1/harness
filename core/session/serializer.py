@@ -4,10 +4,30 @@ from dataclasses import asdict
 from typing import Any
 
 from core.session.content_replacement import ContentReplacementState
-from core.session.state import SessionState, TodoItem, TodoState
+from core.session.state import DispatchRunRecord, DispatchState, SessionState, TodoItem, TodoState
 from core.skills.models import InvokedSkillRecord, SkillEvent
 from core.tasks.models import TaskRecord, TaskState
 from core.tools.context import FileState
+
+
+def _normalize_dispatch_state(raw: dict[str, Any]) -> DispatchState:
+    runs_by_id = {
+        run_id: DispatchRunRecord(**payload)
+        for run_id, payload in raw.get("runs_by_id", {}).items()
+    }
+    active_run_id = raw.get("active_run_id")
+    for record in runs_by_id.values():
+        if record.status == "running":
+            record.status = "cancelled"
+            record.stop_reason = "cancelled"
+            record.error_detail = "cancelled during session restore"
+    if active_run_id and active_run_id in runs_by_id:
+        active_run_id = None
+    return DispatchState(
+        runs_by_id=runs_by_id,
+        ordered_run_ids=list(raw.get("ordered_run_ids", [])),
+        active_run_id=active_run_id,
+    )
 
 
 class SessionSerializer:
@@ -87,4 +107,7 @@ class SessionSerializer:
             seen_ids=set(replacement_raw.get("seen_ids", [])),
             replacements=dict(replacement_raw.get("replacements", {})),
         )
+
+        dispatch_raw = data.get("dispatch_state", {})
+        state.dispatch_state = _normalize_dispatch_state(dispatch_raw)
         return state

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from core.session.serializer import SessionSerializer
-from core.session.state import SessionState, TodoItem, TodoState
+from core.session.state import DispatchRunRecord, DispatchState, SessionState, TodoItem, TodoState
 from core.tasks.models import TaskRecord, TaskState, TaskStatus, TaskExecutionMode
 
 
@@ -73,3 +73,65 @@ class TestSessionSerializerRoundTrip:
         assert restored.user_turn_count == 7
         assert restored.turns_since_memory_review == 2
         assert restored.memory_review_interval == 3
+
+
+def test_dispatch_state_round_trip() -> None:
+    state = SessionState(conversation_messages=[])
+    state.dispatch_state = DispatchState(
+        runs_by_id={
+            "run-1": DispatchRunRecord(
+                run_id="run-1",
+                source_tool="task_execute",
+                task_id="task-1",
+                task_subject="Inspect runtime",
+                agent_type="plan",
+                status="completed",
+                prompt_preview="Task: Inspect runtime",
+                prompt_text="Task: Inspect runtime\n\nDirective:\nInspect deeply",
+                result_summary="Listed the runtime breakpoints.",
+                stop_reason="completed",
+                turns_used=3,
+                started_at_turn=5,
+                completed_at_turn=5,
+            )
+        },
+        ordered_run_ids=["run-1"],
+        active_run_id=None,
+    )
+
+    data = SessionSerializer.serialize(state)
+    restored = SessionSerializer.deserialize(data)
+
+    record = restored.dispatch_state.runs_by_id["run-1"]
+    assert record.source_tool == "task_execute"
+    assert record.prompt_preview == "Task: Inspect runtime"
+    assert record.stop_reason == "completed"
+    assert restored.dispatch_state.ordered_run_ids == ["run-1"]
+
+
+def test_deserialize_marks_running_dispatch_as_cancelled() -> None:
+    restored = SessionSerializer.deserialize(
+        {
+            "conversation_messages": [],
+            "dispatch_state": {
+                "runs_by_id": {
+                    "run-1": {
+                        "run_id": "run-1",
+                        "source_tool": "agent",
+                        "agent_type": "general",
+                        "status": "running",
+                        "prompt_preview": "Investigate the repo",
+                        "started_at_turn": 9,
+                    }
+                },
+                "ordered_run_ids": ["run-1"],
+                "active_run_id": "run-1",
+            },
+        }
+    )
+
+    record = restored.dispatch_state.runs_by_id["run-1"]
+    assert record.status == "cancelled"
+    assert record.stop_reason == "cancelled"
+    assert record.error_detail == "cancelled during session restore"
+    assert restored.dispatch_state.active_run_id is None

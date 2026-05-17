@@ -27,6 +27,31 @@ from .content_replacement import ContentReplacementState
 
 
 @dataclass(slots=True)
+class DispatchRunRecord:
+    run_id: str
+    source_tool: str
+    agent_type: str
+    status: str
+    task_id: str | None = None
+    task_subject: str | None = None
+    prompt_preview: str = ""
+    prompt_text: str | None = None
+    result_summary: str | None = None
+    error_detail: str | None = None
+    stop_reason: str | None = None
+    turns_used: int = 0
+    started_at_turn: int = 0
+    completed_at_turn: int | None = None
+
+
+@dataclass(slots=True)
+class DispatchState:
+    runs_by_id: dict[str, DispatchRunRecord] = field(default_factory=dict)
+    ordered_run_ids: list[str] = field(default_factory=list)
+    active_run_id: str | None = None
+
+
+@dataclass(slots=True)
 class TodoItem:
     """单个 todo 项。模型通过 todo 工具管理任务计划。"""
     content: str           # 完整任务描述（做什么、对什么对象、预期产出）
@@ -107,6 +132,8 @@ class SessionState:
     compact_state: dict[str, Any] = field(default_factory=_default_compact_state)
     content_replacement_state: ContentReplacementState = field(default_factory=ContentReplacementState)
     user_intents: list[str] = field(default_factory=list)
+
+    dispatch_state: DispatchState = field(default_factory=DispatchState)
 
     # ── Behavioral anchoring countermeasure state ──────────────────
     # 跨 query 持久化（不能放 RunState，因为 RunState 每次 QueryLoop.run() 重建）
