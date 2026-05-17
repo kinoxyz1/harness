@@ -249,6 +249,33 @@ class RichRenderer:
         """显示状态信息（灰色 dim）。"""
         self._console.print(f"[dim]{message}[/dim]")
 
+    def show_subagent_event(self, event: dict[str, Any]) -> None:
+        name = event.get("event", "")
+        run_id = event.get("run_id", "unknown")
+        agent_type = event.get("agent_type", "general")
+        prefix = f"subagent[{run_id}/{agent_type}]"
+
+        if name == "subagent_prompt":
+            self._console.print(f"[dim]{prefix} prompt[/dim]")
+            self._console.print(_preview_output(str(event.get("content", "")), max_lines=20, max_chars=1200), markup=False)
+            return
+        if name == "subagent_tool_call_start":
+            self._console.print(f"[yellow]$ {prefix} {_tool_call_label(event.get(tool_name, ), event.get(tool_args, {}))}[/yellow]")
+            return
+        if name == "subagent_tool_call_result":
+            self._console.print(_preview_output(str(event.get(content, ))), markup=False)
+            return
+        if name == "subagent_content_delta":
+            self._console.print(f"[dim]{prefix} output[/dim]")
+            render_markdown(self._console, str(event.get("content", "")))
+            return
+        if name == "subagent_done":
+            self._console.print(f"[dim]{prefix} done ({event.get(stop_reason, unknown)}, turns={event.get(turns_used, 0)})[/dim]")
+            return
+        if name == "subagent_error":
+            self._console.print(f"[red]{prefix} error: {event.get(content, )}[/red]")
+            return
+
     def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:
         self._stream_turn_id = turn_id
         self._thinking_text = ""
@@ -383,6 +410,9 @@ class QuietRenderer:
         pass
 
     def show_status(self, message: str) -> None:
+        pass
+
+    def show_subagent_event(self, event: dict[str, Any]) -> None:
         pass
 
     def begin_stream(self, turn_id: str, meta: dict[str, Any]) -> None:

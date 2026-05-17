@@ -44,6 +44,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
         SubagentType,
         dispatch_subagent,
         render_subagent_summary,
+        emit_to_renderer,
     )
     from core.tasks.models import TaskPacket
 
@@ -83,7 +84,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
             task_packet=packet,
             agent_type=agent_type,
         ),
-        emit=None,
+        emit=emit_to_renderer(context.renderer),
     )
 
     result = execution.result

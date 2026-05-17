@@ -123,6 +123,20 @@ DEFAULT_SUBAGENTS: dict[SubagentType, SubagentDefinition] = {
 }
 
 
+def emit_to_renderer(renderer):
+    """Create an emit callback that forwards subagent events to a renderer's show_subagent_event."""
+    if renderer is None:
+        return None
+
+    def emit(event: dict[str, Any]) -> None:
+        if hasattr(renderer, "show_subagent_event"):
+            renderer.show_subagent_event(event)
+
+    return emit
+
+
+
+
 def get_subagent_definition(agent_type: SubagentType) -> SubagentDefinition:
     """根据 agent type 返回内置子代理定义。"""
     try:

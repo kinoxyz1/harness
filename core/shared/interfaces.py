@@ -98,3 +98,6 @@ class Renderer(Protocol):
         """结束流式输出会话。"""
         ...
 
+    def show_subagent_event(self, event: dict[str, Any]) -> None:
+        """显示 subagent 专属事件。"""
+        ...

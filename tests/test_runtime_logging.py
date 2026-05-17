@@ -566,3 +566,42 @@ def test_renderer_stream_display_uses_markdown_for_content(monkeypatch) -> None:
 
     parts = list(getattr(captured["renderable"], "renderables", []))
     assert any(isinstance(part, Markdown) for part in parts)
+
+
+class SubagentEventFakeRenderer:
+    def __init__(self) -> None:
+        self.tool_calls = []
+        self.tool_results = []
+        self.status_calls = []
+        self.subagent_events = []
+
+    def show_subagent_event(self, event: dict) -> None:
+        self.subagent_events.append(event)
+
+
+def test_renderer_receives_first_class_subagent_events() -> None:
+    renderer = SubagentEventFakeRenderer()
+    renderer.show_subagent_event(
+        {
+            "event": "subagent_prompt",
+            "run_id": "run-1",
+            "source_tool": "task_execute",
+            "agent_type": "plan",
+            "content": "Task: Inspect runtime",
+        }
+    )
+    renderer.show_subagent_event(
+        {
+            "event": "subagent_done",
+            "run_id": "run-1",
+            "source_tool": "task_execute",
+            "agent_type": "plan",
+            "stop_reason": "completed",
+            "turns_used": 2,
+        }
+    )
+
+    assert [event["event"] for event in renderer.subagent_events] == [
+        "subagent_prompt",
+        "subagent_done",
+    ]

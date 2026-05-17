@@ -30,6 +30,7 @@ ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": False, "co
 
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
     from core.session.subagent import SubagentRequest, SubagentType, dispatch_subagent, _render_fresh_packet
+    from core.session.subagent import emit_to_renderer
     from core.tasks.dispatcher import compile_task_packet, normalize_subagent_result
 
     state = context.session_state
@@ -100,7 +101,7 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
             agent_type=agent_type,
             preloaded_skill_ids=list(task.required_skill_ids),
         ),
-        emit=None,
+        emit=emit_to_renderer(context.renderer),
     )
     normalized = normalize_subagent_result(task.task_id, execution.result)
 
