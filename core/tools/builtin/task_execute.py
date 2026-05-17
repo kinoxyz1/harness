@@ -29,7 +29,7 @@ ANNOTATIONS = {"readonly": False, "destructive": False, "idempotent": False, "co
 
 
 def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutcome:
-    from core.session.subagent import SubagentRequest, SubagentRuntime, SubagentType
+    from core.session.subagent import SubagentRequest, SubagentType, dispatch_subagent, _render_fresh_packet
     from core.tasks.dispatcher import compile_task_packet, normalize_subagent_result
 
     state = context.session_state
@@ -78,81 +78,31 @@ def handle(args: dict[str, Any], context: ToolUseContext) -> ToolInvocationOutco
                 messages=[make_tool_message(context, f"Dependency not completed: {dep_id}")],
             )
 
-    # Compile packet and run subagent
+    # Compile packet and dispatch subagent
     packet = compile_task_packet(task)
     agent_type = SubagentType(task.agent_type) if task.agent_type else SubagentType.GENERAL
-    runtime = SubagentRuntime(parent_context=context)
-
-    # Buffers for subagent streaming display
-    _sub_thinking = ""
-    _sub_content = ""
-
-    def emit(event: dict[str, Any]) -> None:
-        nonlocal _sub_thinking, _sub_content
-        renderer = context.renderer
-        if renderer is None:
-            return
-        event_name = event.get("event", "")
-        task_ref = event.get("task_id", task.task_id)
-        if event_name == "subagent_start":
-            _sub_thinking = ""
-            _sub_content = ""
-            renderer.show_status(
-                f"subagent[{task_ref}] 已启动 ({event.get('agent_type', agent_type.value)})"
-            )
-            return
-        if event_name == "subagent_done":
-            # Flush any remaining buffered content
-            if _sub_content.strip():
-                renderer.show_assistant(_sub_content)
-            renderer.show_status(
-                f"subagent[{task_ref}] 已结束 ({event.get('stop_reason', 'unknown')}, turns={event.get('turns_used', 0)})"
-            )
-            return
-        if event_name == "subagent_error":
-            renderer.show_error(str(event.get("content", "subagent error")))
-            return
-        # Accumulate streaming content — show on tool calls to batch properly
-        if event_name == "subagent_thinking_delta":
-            _sub_thinking += str(event.get("content", ""))
-            return
-        if event_name == "subagent_content_delta":
-            _sub_content += str(event.get("content", ""))
-            return
-        if event_name == "subagent_tool_call_start":
-            # Flush accumulated content before showing tool call
-            if _sub_content.strip():
-                renderer.show_assistant(_sub_content)
-                _sub_content = ""
-            renderer.show_tool_call(
-                event.get("tool_name", "unknown"),
-                event.get("tool_args", {}),
-            )
-            return
-        if event_name == "subagent_tool_call_result":
-            renderer.show_tool_result(
-                event.get("tool_name", "unknown"),
-                str(event.get("content", "")),
-            )
-            return
-        if event_name == "subagent_status":
-            renderer.show_status(str(event.get("content", "")))
-            return
+    prompt_text = _render_fresh_packet(packet)
 
     if context.renderer is not None:
         skills = ", ".join(task.required_skill_ids) if task.required_skill_ids else "none"
         context.renderer.show_status(
             f"派发 fresh_subagent {task.task_id}: {task.subject} | skills={skills}"
         )
-    sub_result = runtime.run(
-        SubagentRequest(
+
+    execution = dispatch_subagent(
+        parent_context=context,
+        source_tool="task_execute",
+        task_id=task.task_id,
+        task_subject=task.subject,
+        prompt_text=prompt_text,
+        request=SubagentRequest(
             task_packet=packet,
             agent_type=agent_type,
             preloaded_skill_ids=list(task.required_skill_ids),
         ),
-        emit=emit if context.renderer is not None else None,
+        emit=None,
     )
-    normalized = normalize_subagent_result(task.task_id, sub_result)
+    normalized = normalize_subagent_result(task.task_id, execution.result)
 
     # Write back results to task
     next_task = replace(

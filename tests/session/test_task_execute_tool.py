@@ -223,3 +223,40 @@ def test_task_execute_rejects_legacy_execution_mode_value(tmp_path) -> None:
 
     assert result.status.value == "failure"
     assert result.error == "unsupported_execution_mode"
+
+
+def test_task_execute_uses_dispatch_helper_with_rendered_packet(tmp_path) -> None:
+    from core.tools.builtin.task_execute import handle
+
+    state = SessionState(conversation_messages=[])
+    state.task_state.tasks_by_id["task-1"] = TaskRecord(
+        task_id="task-1",
+        subject="Inspect runtime",
+        goal="Inspect runtime deeply",
+        description="Read runtime and summarize breakpoints.",
+        status=TaskStatus.IN_PROGRESS,
+        execution_mode=TaskExecutionMode.FRESH_SUBAGENT,
+        agent_type="plan",
+    )
+    state.task_state.ordered_task_ids = ["task-1"]
+
+    fake_exec = SimpleNamespace(
+        run_id="run-1",
+        record=SimpleNamespace(run_id="run-1"),
+        result=SimpleNamespace(
+            success=True,
+            output="done",
+            files_modified=[],
+            stop_reason=SubagentStopReason.COMPLETED,
+            turns_used=2,
+        ),
+    )
+
+    with patch("core.session.subagent.dispatch_subagent", return_value=fake_exec) as dispatch_mock:
+        handle({"task_id": "task-1"}, _context(state, tmp_path))
+
+    kwargs = dispatch_mock.call_args.kwargs
+    assert kwargs["source_tool"] == "task_execute"
+    assert kwargs["task_id"] == "task-1"
+    assert "Directive:" in kwargs["prompt_text"]
+    assert "Read runtime and summarize breakpoints." in kwargs["prompt_text"]
